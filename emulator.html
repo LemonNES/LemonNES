@@ -456,8 +456,9 @@
 
     // Fetch background tile data (on visible scanlines)
     bgFetch(){ const nt = 0x2000 | (this.v & 0x0FFF); const at = 0x23C0 | (this.v & 0x0C00) | ((this.v>>4) & 0x38) | ((this.v>>2)&0x07);
-      const fineY = (this.v>>12)&7; const tile = this.ppuRead(nt); const attr = this.ppuRead(at); const shift = ((this.v>>4)&4)| (this.v&2);
-      const pal = ((attr>>shift)&3) << 2; const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000; const addr = base + tile*16 + fineY;
+      const fineY = (this.v>>12)&7; const tile = this.ppuRead(nt); const attr = this.ppuRead(at); const quadrant = ((this.v >> 4) & 4) | ((this.v >> 2) & 2); 
+const pal = ((attr >> quadrant) & 0x03);
+ << 2; const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000; const addr = base + tile*16 + fineY;
       const lo = this.ppuRead(addr); const hi = this.ppuRead(addr+8); return {lo,hi,pal}; }
 
     // Sprite evaluation for current scanline
@@ -465,11 +466,11 @@
     }
 
     // Render a single pixel at (x,y) using bg + sprite
-    renderPixel(x,y,bg,sp){ const idx = (y*256 + x)*4; const img=this.output.data; let colorIndex = 0; let bgPx=0;
-      if((this.mask & 0x08)){ // background enable
-        const bit = 7 - ((x + this.x) & 7);
-        bgPx = ((bg.hi>>bit)&1)<<1 | ((bg.lo>>bit)&1);
-        if(bgPx){ colorIndex = 0x10 + bg.pal + bgPx; } else colorIndex = 0; // universal background
+    renderPixel(x,y,bg,sp){ const idx = (y*256 + x)*4; const img=this.output.data; let colorIndex = 0; if(bgPx){
+    colorIndex = (bg.pal << 2) | bgPx; } if(spPx !== 0 && (bgPx === 0 || spritePriority === 0)){
+    colorIndex = 0x10 + (spPal << 2) + spPx; 
+}
+ // universal background
       }
       let spriteOpaque = 0, spritePriority=0, spritePalette=0, sprite0=false, spPx=0;
       if((this.mask & 0x10)){
