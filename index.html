@@ -109,18 +109,23 @@ document.getElementById("pauseBtn").addEventListener("click", () => {
 });
 
 // ---- Load ROM ----
-  document.getElementById("romLoader").addEventListener("change", async (e) => {
+  const startBtn = document.getElementById("startBtn");
+startBtn.disabled = true;
+
+document.getElementById("romLoader").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
   const buffer = await file.arrayBuffer();
 
-  nes = new NES();        // assign to global nes
-  nes.ppu = new PPU();    // link compiled PPU
+  nes = new NES();
+  nes.ppu = new PPU();
   nes.loadROM(new Uint8Array(buffer));
 
   console.log("ROM loaded:", file.name);
+  startBtn.disabled = false;  // enable Start button only after ROM loads
 });
+
 
 </script>
 
