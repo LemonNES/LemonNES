@@ -74,6 +74,25 @@ ctx.putImageData(imageData, 0, 0);
 </div>
 
 <canvas id="screen" width="256" height="240"></canvas>
+<script>
+let nes = null;
+let animationId = 0;
+
+function runFrame() {
+  nes.frame();  // step emulator
+
+  const ctx = document.getElementById("screen").getContext("2d");
+  const imageData = ctx.createImageData(256, 240);
+
+  // Assuming nes.ppu.framebuffer is a Uint8ClampedArray RGBA buffer
+  imageData.data.set(nes.ppu.framebuffer);
+
+  ctx.putImageData(imageData, 0, 0);
+
+  animationId = requestAnimationFrame(runFrame);
+}
+</script>
+
 
 <script>
 let nes;              // your NES emulator instance
