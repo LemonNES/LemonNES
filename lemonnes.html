@@ -324,130 +324,528 @@
   }
 
   // ===== PPU (cycle-stepped with sprites & sprite-0 hit) =====
-  class PPU{
-    constructor(){
-      this.v=0; this.t=0; this.x=0; this.w=0; // scroll regs
-      this.ctrl=0; this.mask=0; this.status=0; this.oamaddr=0; this.buffered=0;
-      this.oam = new Uint8Array(256); // primary OAM
-      this.secOAM = new Uint8Array(32); // 8 sprites * 4 bytes
-      this.spriteCount=0; this.spriteZeroInLine=false; this.spriteZeroHit=false;
-      this.cycle=0; this.scanline=261; this.frame=0; this.nmi=false; this.cart=null; this.mapper=null; this.canvas=null; this.ctx=null; this.output=null;
-      this.vram = new Uint8Array(0x800); // 2KB internal
-      this.palette = new Uint8Array(32);
-    }
-    attachCanvas(canvas){ this.canvas=canvas; this.ctx=canvas.getContext('2d', { alpha:false, willReadFrequently:true }); this.output=this.ctx.getImageData(0,0,256,240); }
-    connectCart(cart){ this.cart=cart; // select mapper
-      this.mapper = [Mapper0,Mapper1,Mapper2,Mapper3,Mapper4][cart.mapper] ? new ([Mapper0,Mapper1,Mapper2,Mapper3,Mapper4][cart.mapper])(cart) : new Mapper0(cart);
-      this.mirror=cart.mirror; }
-    reset(){ this.v=this.t=this.x=this.w=0; this.ctrl=this.mask=this.status=this.oamaddr=0; this.cycle=0; this.scanline=261; this.nmi=false; this.frame=0; }
+  // ===== PPU (cycle-stepped with sprites & sprite-0 hit) =====
+class PPU {
+  constructor() {
+    // Scroll regs
+    this.v = 0;  // current VRAM address (15 bits)
+    this.t = 0;  // temporary VRAM address (15 bits)
+    this.x = 0;  // fine X scroll (3 bits)
+    this.w = 0;  // write toggle (0/1)
 
-    // PPU registers
-    read(addr){
-      switch(addr){
-        case 0x2002: { // PPUSTATUS
-          const res = (this.status & 0xE0) | (this.buffered & 0x1F);
-          this.status &= ~0x80; this.w=0; return res; }
-        case 0x2004: return this.oam[this.oamaddr];
-        case 0x2007: {
-          const value = this.ppuRead(this.v);
-          this.v += (this.ctrl & 0x04) ? 32 : 1; this.v&=0x7FFF; return value;
+    // Registers
+    this.ctrl = 0;    // $2000
+    this.mask = 0;    // $2001
+    this.status = 0;  // $2002
+    this.oamaddr = 0; // $2003
+    this.buffered = 0; // VRAM read buffer
+
+    // OAM
+    this.oam = new Uint8Array(256);   // primary OAM (64 sprites x 4)
+    this.secOAM = new Uint8Array(32); // secondary OAM (8 sprites x 4)
+    this.spriteCount = 0;
+    this.spriteZeroInLine = false;
+
+    // Timing
+    this.cycle = 0;      // 0..340
+    this.scanline = 261; // -1 (prerender=261), 0..239 visible, 240 post, 241..260 vblank
+    this.frame = 0;
+    this.nmi = false;
+
+    // Cart/Mapper
+    this.cart = null;
+    this.mapper = null;
+    this.mirror = 'horizontal';
+
+    // Video output
+    this.canvas = null;
+    this.ctx = null;
+    this.output = null;
+
+    // PPU memory
+    this.vram = new Uint8Array(0x800);   // 2KB internal nametable RAM
+    this.palette = new Uint8Array(32);   // palette RAM indexes
+
+    // Background fetch latch (simplified)
+    this.bgLatch = { lo: 0, hi: 0, pal: 0 };
+  }
+
+  attachCanvas(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    this.output = this.ctx.getImageData(0, 0, 256, 240);
+  }
+
+  connectCart(cart) {
+    this.cart = cart;
+    // Select mapper
+    const Mappers = [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4];
+    const M = Mappers[cart.mapper] || Mapper0;
+    this.mapper = new M(cart);
+    this.mirror = cart.mirror; // 'vertical' | 'horizontal' | 'single0' | 'single1' etc.
+  }
+
+  reset() {
+    this.v = this.t = this.x = this.w = 0;
+    this.ctrl = this.mask = this.status = this.oamaddr = 0;
+    this.cycle = 0;
+    this.scanline = 261;
+    this.nmi = false;
+    this.frame = 0;
+    this.spriteCount = 0;
+    this.spriteZeroInLine = false;
+  }
+
+  // ===== CPU-visible PPU registers =====
+  read(addr) {
+    addr &= 0xFFFF;
+    switch (addr) {
+      case 0x2002: { // PPUSTATUS
+        const res = (this.status & 0xE0) | (this.buffered & 0x1F);
+        // Clear VBL flag and write toggle
+        this.status &= ~0x80;
+        this.w = 0;
+        return res;
+      }
+      case 0x2004: // OAMDATA
+        return this.oam[this.oamaddr];
+
+      case 0x2007: { // PPUDATA (buffered reads)
+        const addr = this.v & 0x3FFF;
+        let value = this.ppuRead(addr);
+        if (addr < 0x3F00) {
+          // return old buffered, then update buffer
+          const ret = this.buffered;
+          this.buffered = value;
+          value = ret;
+        } else {
+          // Palette reads are not buffered; update buffer with mirrored nametable read
+          this.buffered = this.ppuRead((addr - 0x1000) & 0x3FFF);
         }
-      }
-      return 0;
-    }
-    write(addr,val){
-      switch(addr){
-        case 0x2000: this.ctrl=val; break;
-        case 0x2001: this.mask=val; break;
-        case 0x2003: this.oamaddr=val; break;
-        case 0x2004: this.oam[this.oamaddr++]=val; break;
-        case 0x2005: if(this.w===0){ this.x = val & 0x7; this.t = (this.t & 0x7FE0) | (val>>3); this.w=1; } else { this.t = (this.t & 0x0C1F) | ((val & 0x07) << 12) | ((val & 0xF8) << 2); this.w=0; } break;
-        case 0x2006: if(this.w===0){ this.t = (this.t & 0x00FF) | ((val & 0x3F) << 8); this.w=1; } else { this.t = (this.t & 0x7F00) | val; this.v=this.t; this.w=0; } break;
-        case 0x2007: this.ppuWrite(this.v, val); this.v += (this.ctrl & 0x04) ? 32 : 1; this.v&=0x7FFF; break;
+        // Increment v
+        this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+        return value;
       }
     }
-    doDMA(buf){ for(let i=0;i<256;i++) this.oam[(this.oamaddr+i)&0xFF]=buf[i]; }
+    return 0;
+  }
 
-    // Name table mirroring helpers
-    ntIndex(addr){ const a=(addr-0x2000)&0x0FFF; const nt=(a>>10)&3; const off=a&0x03FF; if(this.mirror==='vertical'){ return ((nt&1)*0x400)+off; } if(this.mirror==='horizontal'){ return (((nt>>1)&1)*0x400)+off; } return off; }
+  write(addr, val) {
+    addr &= 0xFFFF;
+    val &= 0xFF;
+    switch (addr) {
+      case 0x2000: // PPUCTRL
+        this.ctrl = val;
+        // t: ....BA.. ........ = d: ......BA
+        this.t = (this.t & 0xF3FF) | ((val & 0x03) << 10);
+        return;
 
-    ppuRead(addr){ addr &= 0x3FFF; // pattern tables via mapper
-      if(addr<0x2000){ return this.mapper.chrRead(addr); }
-      if(addr<0x3F00){ return this.vram[this.ntIndex(addr)]; }
-      return this.palette[addr & 0x1F];
-    }
-    ppuWrite(addr,val){ addr&=0x3FFF; val&=0xFF; if(addr<0x2000){ this.mapper.chrWrite(addr,val); return; }
-      if(addr<0x3F00){ this.vram[this.ntIndex(addr)]=val; return; }
-      this.palette[addr & 0x1F] = val; }
+      case 0x2001: // PPUMASK
+        this.mask = val;
+        return;
 
-    // Scrolling helpers per dot/scanline
-    incCoarseX(){ if((this.v & 0x001F) === 31){ this.v &= ~0x001F; this.v ^= 0x0400; } else { this.v++; } }
-    incY(){ if((this.v & 0x7000) !== 0x7000){ this.v += 0x1000; } else { this.v &= ~0x7000; let y = (this.v & 0x03E0) >> 5; if(y === 29){ y=0; this.v ^= 0x0800; } else if(y === 31){ y=0; } else { y++; } this.v = (this.v & ~0x03E0) | (y<<5); } }
-    copyX(){ this.v = (this.v & ~0x041F) | (this.t & 0x041F); }
-    copyY(){ this.v = (this.v & ~0x7BE0) | (this.t & 0x7BE0); }
+      case 0x2003: // OAMADDR
+        this.oamaddr = val;
+        return;
 
-    // Fetch background tile data (on visible scanlines)
-    bgFetch(){ const nt = 0x2000 | (this.v & 0x0FFF); const at = 0x23C0 | (this.v & 0x0C00) | ((this.v>>4) & 0x38) | ((this.v>>2)&0x07);
-      const fineY = (this.v>>12)&7; const tile = this.ppuRead(nt); const attr = this.ppuRead(at); const shift = ((this.v>>4)&4)| (this.v&2);
-      const pal = ((attr>>shift)&3) << 2; const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000; const addr = base + tile*16 + fineY;
-      const lo = this.ppuRead(addr); const hi = this.ppuRead(addr+8); return {lo,hi,pal}; }
+      case 0x2004: // OAMDATA (write)
+        this.oam[this.oamaddr] = val;
+        this.oamaddr = (this.oamaddr + 1) & 0xFF;
+        return;
 
-    // Sprite evaluation for current scanline
-    evalSprites(){ const y = this.scanline; this.spriteCount=0; this.spriteZeroInLine=false; for(let i=0;i<64;i++){ const o=i*4; const sy=this.oam[o]; const tile=this.oam[o+1]; const attr=this.oam[o+2]; const sx=this.oam[o+3]; const h = (this.ctrl & 0x20) ? 16 : 8; const row = y - sy; if(row>=0 && row<h && this.spriteCount<8){ if(i===0) this.spriteZeroInLine=true; const flipV = (attr>>7)&1; const flipH = (attr>>6)&1; const palette = (attr & 3) + 4; const priority = (attr>>5)&1; this.secOAM[this.spriteCount*4+0]=sy; this.secOAM[this.spriteCount*4+1]=tile; this.secOAM[this.spriteCount*4+2]=attr; this.secOAM[this.spriteCount*4+3]=sx; this.spriteCount++; if(this.spriteCount===8){ this.status |= 0x20; break; } } }
-    }
-
-    // Render a single pixel at (x,y) using bg + sprite
-    renderPixel(x,y,bg,sp){ const idx = (y*256 + x)*4; const img=this.output.data; let colorIndex = 0; let bgPx=0;
-      if((this.mask & 0x08)){ // background enable
-        const bit = 7 - ((x + this.x) & 7);
-        bgPx = ((bg.hi>>bit)&1)<<1 | ((bg.lo>>bit)&1);
-        if(bgPx){ colorIndex = 0x10 + bg.pal + bgPx; } else colorIndex = 0; // universal background
-      }
-      let spriteOpaque = 0, spritePriority=0, spritePalette=0, sprite0=false, spPx=0;
-      if((this.mask & 0x10)){
-        for(let i=0;i<this.spriteCount;i++){
-          const o=i*4; const sy=this.secOAM[o]; const tile=this.secOAM[o+1]; const attr=this.secOAM[o+2]; const sx=this.secOAM[o+3]; const h=8;
-          const row = y - sy; if(x<sx || x>=sx+8 || row<0 || row>=h) continue;
-          const flipV=(attr>>7)&1, flipH=(attr>>6)&1; const palette=((attr&3)+4)<<2; spritePriority=(attr>>5)&1; if(this.spriteZeroInLine && i===0) sprite0=true;
-          const fineY = flipV? (7-row) : row; const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000; const addr = base + tile*16 + fineY; const lo=this.ppuRead(addr); const hi=this.ppuRead(addr+8); const bit = flipH? (x - sx) : (7 - (x - sx)); spPx = ((hi>>bit)&1)<<1 | ((lo>>bit)&1); if(spPx){ spriteOpaque=1; spritePalette=palette; break; }
+      case 0x2005: // PPUSCROLL
+        if (this.w === 0) {
+          // first write
+          this.x = val & 0x07; // fine X
+          // t: ....... ...HGFED = d: HGFED...
+          this.t = (this.t & 0x7FE0) | (val >> 3);
+          this.w = 1;
+        } else {
+          // second write
+          // t: CBA..HG FED..... = d: HGFEDCBA
+          this.t = (this.t & 0x0C1F) | ((val & 0x07) << 12) | ((val & 0xF8) << 2);
+          this.w = 0;
         }
-      }
-      // sprite-0 hit
-      if(spriteOpaque && bgPx && sprite0 && x<255){ this.status |= 0x40; }
-      const cindex = spriteOpaque && (!spritePriority || bgPx===0) ? (0x10 + spritePalette + spPx) : (bgPx? colorIndex : this.palette[0]);
-      const rgb = NTSC_PALETTE[cindex & 0x3F]; img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255;
-    }
+        return;
 
-    step(){ // cycle-by-cycle PPU
-      // Visible scanlines 0-239; pre-render 261; vblank 241-260
-      if(this.scanline===261){ if(this.cycle===1){ this.status &= ~(0x80|0x40|0x20); } if(this.cycle>=280 && this.cycle<=304 && (this.mask&0x18)){ this.copyY(); }
-      }
-      if(this.scanline>=0 && this.scanline<240){
-        if(this.cycle===0){ /* idle */ }
-        else if(this.cycle===1){ this.evalSprites(); }
-        if(this.cycle>=1 && this.cycle<=256){ // visible dots
-          if((this.cycle&7)===1){ this.bgLatch = this.bgFetch(); }
-          const x = this.cycle-1; const y = this.scanline; this.renderPixel(x,y,this.bgLatch, null);
-          if((this.cycle&7)===0){ this.incCoarseX(); }
+      case 0x2006: // PPUADDR
+        if (this.w === 0) {
+          // high byte (but only 6 bits are used)
+          this.t = (this.t & 0x00FF) | ((val & 0x3F) << 8);
+          this.w = 1;
+        } else {
+          // low byte
+          this.t = (this.t & 0x7F00) | val;
+          this.v = this.t; // copy to v
+          this.w = 0;
         }
-        if(this.cycle===257){ this.copyX(); }
-        if(this.cycle===256){ this.incY(); }
-      }
-      if(this.scanline===241 && this.cycle===1){ this.status |= 0x80; if(this.ctrl & 0x80){ this.nmi=true; } this.ctx.putImageData(this.output,0,0); }
+        return;
 
-      // advance
-      this.cycle++; if(this.cycle>340){ this.cycle=0; this.scanline++; if(this.scanline>261){ this.scanline=0; this.frame++; } }
+      case 0x2007: // PPUDATA (write)
+        this.ppuWrite(this.v & 0x3FFF, val);
+        this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+        return;
     }
   }
 
-  // NES color palette (approx NTSC)
-  const NTSC_PALETTE = [
-    [84,84,84],[0,30,116],[8,16,144],[48,0,136],[68,0,100],[92,0,48],[84,4,0],[60,24,0],[32,42,0],[8,58,0],[0,64,0],[0,60,0],[0,50,60],[0,0,0],[0,0,0],[0,0,0],
-    [152,150,152],[8,76,196],[48,50,236],[92,30,228],[136,20,176],[160,20,100],[152,34,32],[120,60,0],[84,90,0],[40,114,0],[8,124,0],[0,118,40],[0,102,120],[0,0,0],[0,0,0],[0,0,0],
-    [236,238,236],[76,154,236],[120,124,236],[176,98,236],[228,84,236],[236,88,180],[236,106,100],[212,136,32],[160,170,0],[116,196,0],[76,208,32],[56,204,108],[56,180,204],[60,60,60],[0,0,0],[0,0,0],
-    [236,238,236],[168,204,236],[188,188,236],[212,178,236],[236,174,236],[236,174,212],[236,180,176],[228,196,144],[204,210,120],[180,222,120],[168,226,144],[152,226,180],[160,214,228],[160,162,160],[0,0,0],[0,0,0]
-  ];
+  doDMA(buf) {
+    for (let i = 0; i < 256; i++) {
+      this.oam[(this.oamaddr + i) & 0xFF] = buf[i];
+    }
+  }
 
+  // ===== Name table mirroring helpers =====
+  ntIndex(addr) {
+    // Map 0x2000-0x2FFF to 2KB internal VRAM with mirroring.
+    const a = (addr - 0x2000) & 0x0FFF;
+    const nt = (a >> 10) & 3;
+    const off = a & 0x03FF;
+
+    switch (this.mirror) {
+      case 'vertical':
+        // NT0 at $2000 & $2800, NT1 at $2400 & $2C00
+        return ((nt & 1) * 0x400) + off;
+      case 'horizontal':
+        // NT0 at $2000 & $2400, NT1 at $2800 & $2C00
+        return (((nt >> 1) & 1) * 0x400) + off;
+      case 'single0':
+        return off; // all map to NT0
+      case 'single1':
+        return 0x400 + off; // all map to NT1
+      default:
+        // default to first 1KB
+        return off;
+    }
+  }
+
+  // ===== PPU memory read/write =====
+  ppuRead(addr) {
+    addr &= 0x3FFF;
+
+    if (addr < 0x2000) {
+      // Pattern tables via mapper (CHR)
+      return this.mapper.chrRead(addr);
+    }
+
+    if (addr < 0x3F00) {
+      // Nametables via internal VRAM with mirroring
+      return this.vram[this.ntIndex(addr)];
+    }
+
+    // Palette RAM, mirror every 32 bytes; handle $3F10/14/18/1C mirroring
+    const palAddr = this.paletteAddr(addr);
+    return this.palette[palAddr];
+  }
+
+  ppuWrite(addr, val) {
+    addr &= 0x3FFF;
+    val &= 0xFF;
+
+    if (addr < 0x2000) {
+      this.mapper.chrWrite(addr, val);
+      return;
+    }
+
+    if (addr < 0x3F00) {
+      this.vram[this.ntIndex(addr)] = val;
+      return;
+    }
+
+    // Palette write with mirroring
+    const palAddr = this.paletteAddr(addr);
+    this.palette[palAddr] = val & 0x3F; // mask to 6 bits (indexes)
+  }
+
+  paletteAddr(addr) {
+    let a = 0x3F00 + (addr & 0x1F);
+    // Mirror the universal background color
+    if ((a & 0x13) === 0x10) a &= ~0x10; // 3F10,14,18,1C -> 3F00,04,08,0C
+    return a & 0x1F;
+  }
+
+  // ===== Scrolling helpers per dot/scanline =====
+  incCoarseX() {
+    if ((this.v & 0x001F) === 31) {
+      this.v &= ~0x001F;
+      this.v ^= 0x0400;
+    } else {
+      this.v++;
+    }
+  }
+
+  incY() {
+    if ((this.v & 0x7000) !== 0x7000) {
+      this.v += 0x1000; // increment fine Y
+    } else {
+      this.v &= ~0x7000;
+      let y = (this.v & 0x03E0) >> 5; // coarse Y
+      if (y === 29) {
+        y = 0;
+        this.v ^= 0x0800; // switch vertical nametable
+      } else if (y === 31) {
+        y = 0; // attribute table garbage fetch
+      } else {
+        y++;
+      }
+      this.v = (this.v & ~0x03E0) | (y << 5);
+    }
+  }
+
+  copyX() {
+    // Horizontal bits: ....F.. ...EDCBA from t to v
+    this.v = (this.v & ~0x041F) | (this.t & 0x041F);
+  }
+
+  copyY() {
+    // Vertical bits: CBA..HG FED..... from t to v (fine/coarse Y and NT vertical)
+    this.v = (this.v & ~0x7BE0) | (this.t & 0x7BE0);
+  }
+
+  // ===== Background tile fetch (simplified latch per 8 pixels) =====
+  bgFetch() {
+    const nt = 0x2000 | (this.v & 0x0FFF);
+    const at = 0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07);
+
+    const fineY = (this.v >> 12) & 0x07;
+    const tile = this.ppuRead(nt);
+    const attr = this.ppuRead(at);
+
+    // Determine the 2-bit attribute palette for this 32x32 area quadrant
+    const quadrant = ((this.v >> 4) & 4) | ((this.v >> 2) & 2); // {bit3,bit2} -> {row,col}
+    const shift = quadrant; // 0,2,4,6
+    const pal2 = (attr >> shift) & 0x03;
+    const pal = pal2 << 2;
+
+    const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
+    const addr = base + tile * 16 + fineY;
+    const lo = this.ppuRead(addr);
+    const hi = this.ppuRead(addr + 8);
+
+    return { lo, hi, pal };
+  }
+
+  // ===== Sprite evaluation for current scanline =====
+  evalSprites() {
+    const y = this.scanline;
+    this.spriteCount = 0;
+    this.spriteZeroInLine = false;
+    this.status &= ~0x20; // clear sprite overflow; set if we overflow below
+
+    const spriteHeight = (this.ctrl & 0x20) ? 16 : 8;
+
+    for (let i = 0; i < 64; i++) {
+      const o = i * 4;
+      const sy = this.oam[o];
+      const tile = this.oam[o + 1];
+      const attr = this.oam[o + 2];
+      const sx = this.oam[o + 3];
+
+      const row = y - sy;
+      if (row >= 0 && row < spriteHeight) {
+        if (this.spriteCount < 8) {
+          if (i === 0) this.spriteZeroInLine = true;
+          this.secOAM[this.spriteCount * 4 + 0] = sy;
+          this.secOAM[this.spriteCount * 4 + 1] = tile;
+          this.secOAM[this.spriteCount * 4 + 2] = attr;
+          this.secOAM[this.spriteCount * 4 + 3] = sx;
+          this.spriteCount++;
+        } else {
+          // Sprite overflow (simplified behavior)
+          this.status |= 0x20;
+          break;
+        }
+      }
+    }
+  }
+
+  // ===== Render a single pixel using bg + sprite =====
+  renderPixel(x, y, bg) {
+    const idx = (y * 256 + x) * 4;
+    const img = this.output.data;
+
+    // ----- Background pixel -----
+    let bgPx = 0;
+    let bgColorIndex = 0;
+
+    if (this.mask & 0x08) { // background enabled
+      const fineX = (this.x + x) & 7;
+      const bit = 7 - fineX;
+      bgPx = ((bg.hi >> bit) & 1) << 1 | ((bg.lo >> bit) & 1);
+      if (bgPx) {
+        bgColorIndex = (bg.pal | bgPx) & 0x0F; // 0..15 within background bank
+      }
+      // Left 8-pixel background clipping
+      if (!(this.mask & 0x02) && x < 8) bgPx = 0;
+    }
+
+    // ----- Sprite pixel -----
+    let spPx = 0, spPalette = 0, spritePriority = 0, sprite0 = false;
+
+    if (this.mask & 0x10) { // sprites enabled
+      const spriteHeight = (this.ctrl & 0x20) ? 16 : 8;
+
+      for (let i = 0; i < this.spriteCount; i++) {
+        const o = i * 4;
+        const sy = this.secOAM[o];
+        const tile = this.secOAM[o + 1];
+        const attr = this.secOAM[o + 2];
+        const sx = this.secOAM[o + 3];
+
+        const row = y - sy;
+        if (x < sx || x >= sx + 8 || row < 0 || row >= spriteHeight) continue;
+
+        const flipV = (attr >> 7) & 1;
+        const flipH = (attr >> 6) & 1;
+        spritePriority = (attr >> 5) & 1;
+
+        // Determine pattern base for sprite
+        let base = 0x0000;
+        let tileIndex = tile;
+
+        if (spriteHeight === 16) {
+          // In 8x16 mode: the tile number ignores PPUCTRL sprite table;
+          // bit0 selects pattern table, bits1-7 select tile number (even)
+          const table = tile & 1;
+          tileIndex = tile & 0xFE; // even tile index
+          base = table ? 0x1000 : 0x0000;
+          // Select top/bottom tile by Y row
+          const top = (row < 8) ? 0 : 1;
+          const yInTile = flipV ? (row ^ 0x0F) : row;
+          const tileRow = (yInTile < 8) ? 0 : 1;
+          const fineY = yInTile & 7;
+          const fetchTile = tileIndex + tileRow;
+          const addr = base + fetchTile * 16 + fineY;
+          const lo = this.ppuRead(addr);
+          const hi = this.ppuRead(addr + 8);
+          const bit = (flipH ? (x - sx) : (7 - (x - sx))) & 7;
+          spPx = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+        } else {
+          // 8x8
+          base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
+          const yInTile = flipV ? (7 - row) : row;
+          const addr = base + tileIndex * 16 + yInTile;
+          const lo = this.ppuRead(addr);
+          const hi = this.ppuRead(addr + 8);
+          const bit = (flipH ? (x - sx) : (7 - (x - sx))) & 7;
+          spPx = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+        }
+
+        // Left 8-pixel sprite clipping
+        if (!(this.mask & 0x04) && x < 8) spPx = 0;
+
+        if (spPx) {
+          spPalette = ((attr & 0x03) + 4) << 2; // sprite palettes start at 4 (i.e., $10 range)
+          if (this.spriteZeroInLine && i === 0) sprite0 = true;
+          break;
+        }
+      }
+    }
+
+    // ----- Sprite 0 hit -----
+    if (spPx && bgPx && sprite0 && x < 255) {
+      this.status |= 0x40;
+    }
+
+    // ----- Final color selection -----
+    let cindex = 0;
+    if (spPx && (!spritePriority || !bgPx)) {
+      // sprite pixel visible
+      cindex = 0x10 + spPalette + spPx; // sprite palette area
+    } else if (bgPx) {
+      // background pixel visible
+      cindex = bgColorIndex;
+    } else {
+      // universal background color
+      cindex = this.palette[0] & 0x3F;
+    }
+
+    const rgb = (typeof NTSC_PALETTE !== 'undefined' && NTSC_PALETTE[cindex & 0x3F]) ? NTSC_PALETTE[cindex & 0x3F] : [0, 0, 0];
+    img[idx] = rgb[0];
+    img[idx + 1] = rgb[1];
+    img[idx + 2] = rgb[2];
+    img[idx + 3] = 255;
+  }
+
+  // ===== PPU main step (cycle-by-cycle) =====
+  step() {
+    // Pre-render line (261)
+    if (this.scanline === 261) {
+      if (this.cycle === 1) {
+        // Clear vblank, sprite 0 hit, sprite overflow
+        this.status &= ~(0x80 | 0x40 | 0x20);
+      }
+      // During cycles 280–304, if rendering is enabled, copy Y from t to v
+      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {
+        this.copyY();
+      }
+    }
+
+    // Visible scanlines 0..239
+    if (this.scanline >= 0 && this.scanline < 240) {
+      if (this.cycle === 0) {
+        // idle
+      }
+
+      // Visible dots 1..256
+      if (this.cycle >= 1 && this.cycle <= 256) {
+        if ((this.cycle & 7) === 1) {
+          // fetch new bg tile every 8 pixels
+          this.bgLatch = this.bgFetch();
+        }
+
+        const x = this.cycle - 1;
+        const y = this.scanline;
+        this.renderPixel(x, y, this.bgLatch);
+
+        if ((this.cycle & 7) === 0) {
+          this.incCoarseX();
+        }
+      }
+
+      // Sprite evaluation happens at dot 257 in hardware; do it here (once per scanline)
+      if (this.cycle === 257) {
+        this.copyX();
+        if (this.mask & 0x18) {
+          this.evalSprites();
+        } else {
+          this.spriteCount = 0;
+          this.spriteZeroInLine = false;
+        }
+      }
+
+      if (this.cycle === 256) {
+        this.incY();
+      }
+    }
+
+    // VBlank start
+    if (this.scanline === 241 && this.cycle === 1) {
+      this.status |= 0x80; // set vblank
+      if (this.ctrl & 0x80) {
+        this.nmi = true;
+      }
+      // Present frame
+      if (this.ctx && this.output) {
+        this.ctx.putImageData(this.output, 0, 0);
+      }
+    }
+
+    // Advance timing
+    this.cycle++;
+    if (this.cycle > 340) {
+      this.cycle = 0;
+      this.scanline++;
+      if (this.scanline > 261) {
+        this.scanline = 0;
+        this.frame++;
+      }
+    }
+  }
+}
+
+// Export if needed (Node/CommonJS or ES module)
+// module.exports = PPU;
+// export default PPU;
   // ===== 6502 CPU (official opcodes only) =====
   class CPU6502{
     constructor(bus){ this.bus=bus; this.a=0; this.x=0; this.y=0; this.sp=0xFD; this.p=0x24; this.pc=0; this.cycles=0; this.stall=0; this.resetVector=0x8000; }
