@@ -61,12 +61,70 @@
   <!-- Video output -->
   <canvas id="screen" width="256" height="240"></canvas>
 
+// write pixels into imageData.data here (RGBA format)
+
+ctx.putImageData(imageData, 0, 0);
+
+
   <!-- Controls -->
-  <div id="controls">
-    <input type="file" id="romLoader" accept=".nes">
-    <button id="startBtn">Start</button>
-    <button id="pauseBtn">Pause</button>
-  </div>
+<div id="controls">
+  <input type="file" id="romLoader" accept=".nes">
+  <button id="startBtn">Start</button>
+  <button id="pauseBtn">Pause</button>
+</div>
+
+<canvas id="screen" width="256" height="240"></canvas>
+
+<script>
+let nes;              // your NES emulator instance
+let animationId = 0;  // requestAnimationFrame ID for stopping
+
+// ---- Load ROM ----
+document.getElementById("romLoader").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const buffer = await file.arrayBuffer();
+  // assuming your NES class has loadROM(buffer)
+  nes = new NES();
+  nes.loadROM(new Uint8Array(buffer));
+  console.log("ROM loaded:", file.name);
+});
+
+// ---- Start Button ----
+document.getElementById("startBtn").addEventListener("click", () => {
+  if (!nes) {
+    alert("Please load a ROM first!");
+    return;
+  }
+  runFrame();
+});
+
+// ---- Pause Button ----
+document.getElementById("pauseBtn").addEventListener("click", () => {
+  if (animationId) {
+    cancelAnimationFrame(animationId);
+    animationId = 0;
+    console.log("Emulation paused");
+  }
+});
+
+// ---- Main Loop ----
+function runFrame() {
+  // Step the emulator for one frame (CPU+PPU emulation)
+  nes.frame();
+
+  // Draw frame to canvas
+  const ctx = document.getElementById("screen").getContext("2d");
+  const imageData = ctx.getImageData(0, 0, 256, 240);
+  nes.ppu.renderFrame(imageData.data); // you need to implement this method
+  ctx.putImageData(imageData, 0, 0);
+
+  // Keep running at ~60fps
+  animationId = requestAnimationFrame(runFrame);
+}
+</script>
+
 
   <!-- Settings UI (loads your remapping menu inside an iframe) -->
   <iframe src="inputSettings.html"></iframe>
