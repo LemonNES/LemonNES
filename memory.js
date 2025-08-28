@@ -1,75 +1,56 @@
 // memory.js
-// NES CPU Memory Map Implementation
-// 0x0000 - 0xFFFF
+export class Bus {
+  constructor(cpu, ppu, apu, controllers, cart) {
+    this.cpu = cpu;
+    this.ppu = ppu;
+    this.apu = apu;
+    this.controllers = controllers;
+    this.cart = cart;
 
-export default class Memory {
-    constructor(cartridge, ppu, apu, controllers) {
-        this.ram = new Uint8Array(0x0800); // 2KB internal RAM
-        this.cartridge = cartridge;        // PRG-ROM / Mapper
-        this.ppu = ppu;                    // Picture Processing Unit
-        this.apu = apu;                    // Audio Processing Unit
-        this.controllers = controllers;    // Input
+    this.ram = new Uint8Array(0x800); // 2KB internal
+  }
 
-        this.reset();
+  cpuRead(addr) {
+    addr &= 0xFFFF;
+    // CPU reads
+    if (addr < 0x2000) return this.ram[addr & 0x7FF];
+    if (addr < 0x4000) return this.ppu.read(0x2000 + (addr & 7));
+    if (addr === 0x4016) return this.controllers[0].read();
+    if (addr === 0x4017) return this.controllers[1].read();
+    if (addr === 0x4015) return this.apu.read ? this.apu.read(0x4015) : 0; // APU status
+    if (addr >= 0x8000) return this.cart.prgRead ? this.cart.prgRead(addr) : this.cart.read(addr);
+    if (addr >= 0x6000) return this.cart.sram ? this.cart.sram[addr - 0x6000] : 0;
+    return 0;
+  }
+
+  cpuWrite(addr, val) {
+    addr &= 0xFFFF; val &= 0xFF;
+    if (addr < 0x2000) { this.ram[addr & 0x7FF] = val; return; }
+    if (addr < 0x4000) { this.ppu.write(0x2000 + (addr & 7), val); return; }
+    if (addr === 0x4014) {
+      // OAM DMA - read 256 bytes from page and write to PPU OAM
+      const page = val << 8;
+      const buf = new Uint8Array(256);
+      for (let i=0;i<256;i++) buf[i] = this.cpuRead(page + i);
+      if (this.ppu.doDMA) this.ppu.doDMA(buf);
+      // CPU is stalled in real hw; our CPU.step will be simple MVP (no stall).
+      return;
     }
-
-    reset() {
-        this.ram.fill(0);
+    if (addr === 0x4016) {
+      this.controllers.forEach(c => c.write(val));
+      return;
     }
-
-    // Read 8-bit value from memory
-    read(addr) {
-        addr &= 0xFFFF; // wrap to 16-bit space
-
-        if (addr < 0x2000) {
-            // RAM + mirrors
-            return this.ram[addr % 0x0800];
-        }
-        else if (addr < 0x4000) {
-            // PPU registers (mirrored every 8 bytes)
-            return this.ppu.readRegister(addr % 8);
-        }
-        else if (addr === 0x4016 || addr === 0x4017) {
-            // Controller input
-            return this.controllers.read(addr);
-        }
-        else if (addr >= 0x4000 && addr < 0x4020) {
-            // APU and I/O registers
-            return this.apu.readRegister(addr);
-        }
-        else if (addr >= 0x4020) {
-            // Cartridge space: PRG-ROM, PRG-RAM, mapper-controlled
-            return this.cartridge.cpuRead(addr);
-        }
-
-        return 0; // open bus (default)
+    if (addr >= 0x4000 && addr <= 0x4017) {
+      if (this.apu && this.apu.write) this.apu.write(addr, val);
+      return;
     }
-
-    // Write 8-bit value to memory
-    write(addr, value) {
-        addr &= 0xFFFF;
-        value &= 0xFF;
-
-        if (addr < 0x2000) {
-            // RAM + mirrors
-            this.ram[addr % 0x0800] = value;
-        }
-        else if (addr < 0x4000) {
-            // PPU registers (mirrored)
-            this.ppu.writeRegister(addr % 8, value);
-        }
-        else if (addr >= 0x4000 && addr < 0x4020) {
-            if (addr === 0x4016 || addr === 0x4017) {
-                // Controller strobe
-                this.controllers.write(addr, value);
-            } else {
-                // APU and I/O
-                this.apu.writeRegister(addr, value);
-            }
-        }
-        else if (addr >= 0x4020) {
-            // Cartridge / mapper
-            this.cartridge.cpuWrite(addr, value);
-        }
+    if (addr >= 0x8000) {
+      if (this.cart && this.cart.prgWrite) this.cart.prgWrite(addr, val);
+      return;
     }
+    if (addr >= 0x6000) {
+      if (this.cart && this.cart.sram) this.cart.sram[addr-0x6000] = val;
+      return;
+    }
+  }
 }
