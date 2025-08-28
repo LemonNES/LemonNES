@@ -1,1 +1,1 @@
-#LemonNES - In-Development Browser Based NES Emulator
+*LemonNES - In-Development Browser Based NES Emulator
