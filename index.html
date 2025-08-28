@@ -113,6 +113,8 @@ document.getElementById("romLoader").addEventListener("change", async (e) => {
 });
 
 // ---- Start Button ----
+  let nes = null;   // global reference so both loader + start can see it
+
 document.getElementById("startBtn").addEventListener("click", () => {
   if (!nes) {
     alert("Please load a ROM first!");
