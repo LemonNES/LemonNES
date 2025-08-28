@@ -1,5 +1,144 @@
 // cpu6502.js
-// Export CPU6502 class as ES module
+export class CPU6502 {
+    constructor(memory) {
+        this.memory = memory;
+
+        // Registers
+        this.A = 0x00;   // Accumulator
+        this.X = 0x00;   // X index
+        this.Y = 0x00;   // Y index
+        this.SP = 0xFD;  // Stack pointer
+        this.PC = this.read16(0xFFFC); // Reset vector
+        this.status = 0x34; // Processor status
+
+        // Internal
+        this.cycles = 0;
+        this.opcode = 0;
+        this.addr = 0;
+        this.fetched = 0;
+
+        // Opcode table
+        this.opcodes = this.buildOpcodeTable();
+    }
+
+    reset() {
+        this.A = 0;
+        this.X = 0;
+        this.Y = 0;
+        this.SP = 0xFD;
+        this.status = 0x34;
+        this.PC = this.read16(0xFFFC);
+        this.cycles = 7; // Reset cycle cost
+    }
+
+    read(addr) {
+        return this.memory.read(addr);
+    }
+
+    write(addr, value) {
+        this.memory.write(addr, value);
+    }
+
+    read16(addr) {
+        // 6502 little-endian
+        const lo = this.read(addr);
+        const hi = this.read(addr + 1);
+        return (hi << 8) | lo;
+    }
+
+    fetch() {
+        // For instructions that fetch a value
+        if (this.opcode.addrMode !== 'IMP') {
+            this.fetched = this.read(this.addr);
+        }
+    }
+
+    step() {
+        if (this.cycles === 0) {
+            this.opcode = this.opcodes[this.read(this.PC)];
+            this.PC++;
+            this.addr = this.getAddress(this.opcode.addrMode);
+            this.fetch();
+            this.cycles = this.opcode.cycles;
+            this.execute(this.opcode.mnemonic);
+        }
+        this.cycles--;
+    }
+
+    getAddress(addrMode) {
+        switch (addrMode) {
+            case 'IMM': return this.PC++;
+            case 'ZP0': return this.read(this.PC++);
+            case 'ZPX': return (this.read(this.PC++) + this.X) & 0xFF;
+            case 'ZPY': return (this.read(this.PC++) + this.Y) & 0xFF;
+            case 'ABS': {
+                const lo = this.read(this.PC++);
+                const hi = this.read(this.PC++);
+                return (hi << 8) | lo;
+            }
+            case 'ABX': {
+                const lo = this.read(this.PC++);
+                const hi = this.read(this.PC++);
+                return ((hi << 8) | lo) + this.X;
+            }
+            case 'ABY': {
+                const lo = this.read(this.PC++);
+                const hi = this.read(this.PC++);
+                return ((hi << 8) | lo) + this.Y;
+            }
+            case 'IND': {
+                const ptr = this.read16(this.PC);
+                // 6502 page bug
+                const lo = this.read(ptr);
+                const hi = this.read((ptr & 0xFF00) | ((ptr + 1) & 0xFF));
+                this.PC += 2;
+                return (hi << 8) | lo;
+            }
+            case 'REL': return this.PC + this.read(this.PC++);
+            case 'IMP': return 0; // implied
+            default: return 0;
+        }
+    }
+
+    execute(mnemonic) {
+        switch (mnemonic) {
+            case 'LDA': this.A = this.fetched; this.setZN(this.A); break;
+            case 'LDX': this.X = this.fetched; this.setZN(this.X); break;
+            case 'LDY': this.Y = this.fetched; this.setZN(this.Y); break;
+            case 'STA': this.write(this.addr, this.A); break;
+            case 'STX': this.write(this.addr, this.X); break;
+            case 'STY': this.write(this.addr, this.Y); break;
+            case 'TAX': this.X = this.A; this.setZN(this.X); break;
+            case 'TAY': this.Y = this.A; this.setZN(this.Y); break;
+            case 'TXA': this.A = this.X; this.setZN(this.A); break;
+            case 'TYA': this.A = this.Y; this.setZN(this.A); break;
+            case 'INX': this.X = (this.X + 1) & 0xFF; this.setZN(this.X); break;
+            case 'INY': this.Y = (this.Y + 1) & 0xFF; this.setZN(this.Y); break;
+            case 'DEX': this.X = (this.X - 1) & 0xFF; this.setZN(this.X); break;
+            case 'DEY': this.Y = (this.Y - 1) & 0xFF; this.setZN(this.Y); break;
+            case 'NOP': break;
+            default: console.log('Unimplemented opcode:', mnemonic); break;
+        }
+    }
+
+    setZN(value) {
+        this.status = (this.status & 0x7D) | (value === 0 ? 0x02 : 0) | (value & 0x80);
+    }
+
+    buildOpcodeTable() {
+        // Only implement a minimal subset for testing
+        return {
+            0xA9: { mnemonic: 'LDA', addrMode: 'IMM', cycles: 2 },
+            0xA2: { mnemonic: 'LDX', addrMode: 'IMM', cycles: 2 },
+            0xA0: { mnemonic: 'LDY', addrMode: 'IMM', cycles: 2 },
+            0xAA: { mnemonic: 'TAX', addrMode: 'IMP', cycles: 2 },
+            0xE8: { mnemonic: 'INX', addrMode: 'IMP', cycles: 2 },
+            0x00: { mnemonic: 'NOP', addrMode: 'IMP', cycles: 2 },
+            // Add more opcodes as needed
+        };
+    }
+}
+
 export class CPU6502 {
   constructor() {
     this.bus = null;
