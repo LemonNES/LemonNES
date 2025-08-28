@@ -1,0 +1,152 @@
+​You​
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NES Emulator</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #1e1e1e;
+      color: #f0f0f0;
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    header {
+      background: #2c2c2c;
+      width: 100%;
+      padding: 10px;
+      text-align: center;
+      border-bottom: 2px solid #444;
+    }
+    canvas {
+      margin-top: 20px;
+      border: 2px solid #444;
+      image-rendering: pixelated;
+    }
+    #controls {
+      margin-top: 20px;
+    }
+    button {
+      background: #3a3a3a;
+      color: #f0f0f0;
+      border: 1px solid #555;
+      padding: 8px 16px;
+      margin: 4px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #555;
+    }
+    iframe {
+      margin-top: 20px;
+      width: 600px;
+      height: 400px;
+      border: 2px solid #444;
+      border-radius: 6px;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>NES Emulator</h1>
+  </header>
+
+  <!-- Video output -->
+  <canvas id="screen" width="256" height="240"></canvas>
+
+  <!-- Controls -->
+  <div id="controls">
+    <input type="file" id="romLoader" accept=".nes">
+    <button id="startBtn">Start</button>
+    <button id="pauseBtn">Pause</button>
+  </div>
+
+  <!-- Settings UI (loads your remapping menu inside an iframe) -->
+  <iframe src="settings.html"></iframe>
+
+  <!-- Emulator scripts -->
+  <script type="module" src="src/cpu.js"></script>
+  <script type="module" src="src/memory.js"></script>
+  <script type="module" src="src/ppu.js"></script>
+  <script type="module" src="src/apu.js"></script>
+  <script type="module" src="src/input.js"></script>
+  <script type="module">
+    import CPU from './src/cpu.js';
+    import Memory from './src/memory.js';
+    import PPU from './src/ppu.js';
+    import APU from './src/apu.js';
+    import { Input } from './src/input.js';
+
+    const canvas = document.getElementById('screen');
+    const ctx = canvas.getContext('2d');
+    const romLoader = document.getElementById('romLoader');
+    const startBtn = document.getElementById('startBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+
+    let cpu, memory, ppu, apu, input;
+    let running = false;
+    let romData = null;
+
+    romLoader.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const arrayBuffer = await file.arrayBuffer();
+      romData = new Uint8Array(arrayBuffer);
+      console.log("Loaded ROM:", file.name, romData.length, "bytes");
+      // TODO: parse iNES header, map PRG/CHR into memory
+    });
+
+    startBtn.addEventListener('click', () => {
+      if (!romData) {
+        alert("Please load a ROM first.");
+        return;
+      }
+      initEmulator();
+      running = true;
+      requestAnimationFrame(mainLoop);
+    });
+
+    pauseBtn.addEventListener('click', () => {
+      running = false;
+    });
+
+    function initEmulator() {
+      memory = new Memory();
+      cpu = new CPU(memory);
+      ppu = new PPU(memory, ctx);
+      apu = new APU(cpu, memory);
+      input = new Input();
+
+      // Wire CPU <-> APU
+      cpu.apu = apu;
+    }
+
+    function mainLoop() {
+      if (!running) return;
+
+      // Run some CPU cycles per frame
+      for (let i = 0; i < 29780; i++) { // ~29780 CPU cycles per NTSC frame
+        cpu.step();
+        apu.step();
+        ppu.step();
+
+        if (apu.getIRQ()) {
+          cpu.triggerIRQ();
+        }
+      }
+
+      // Draw frame (PPU handles canvas)
+      ppu.renderFrame();
+
+      requestAnimationFrame(mainLoop);
+    }
+  </script>
+</body>
+</html>
