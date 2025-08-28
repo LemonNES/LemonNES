@@ -92,7 +92,7 @@ function runFrame() {
 }
 </script>
 <script>
-let nes = null;
+let nes = null;   // global so Start button sees it
 let animationId = 0;
 
 document.getElementById("startBtn").addEventListener("click", () => {
@@ -109,19 +109,19 @@ document.getElementById("pauseBtn").addEventListener("click", () => {
 });
 
 // ---- Load ROM ----
-document.getElementById("romLoader").addEventListener("change", async (e) => {
+  document.getElementById("romLoader").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
   const buffer = await file.arrayBuffer();
-  
-  // create NES instance
-  nes = new NES();              // assuming NES is a global class
-  nes.ppu = new PPU();          // instantiate your PPU from ppu.js
+
+  nes = new NES();        // assign to global nes
+  nes.ppu = new PPU();    // link compiled PPU
   nes.loadROM(new Uint8Array(buffer));
 
   console.log("ROM loaded:", file.name);
 });
+
 </script>
 
 
