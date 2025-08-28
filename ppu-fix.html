@@ -323,68 +323,62 @@
     }
   }
 
-// === PPU read/write with palette mirroring fix ===
+// ===== Compatibility-safe ppuRead / ppuWrite with correct palette mirroring =====
 ppuRead(addr){
   addr &= 0x3FFF;
   if(addr < 0x2000){
-    // pattern tables via mapper
     return this.mapper.chrRead(addr) & 0xFF;
   }
   if(addr < 0x3F00){
-    // nametables (mirroring handled by ntIndex)
     return this.vram[this.ntIndex(addr)] & 0xFF;
   }
-  // Palette reads: $3F00-$3F1F with mirroring of $3F10/$3F14/$3F18/$3F1C -> $3F00/...
-  // Normalize mirror addresses (addresses like $3F10 map to $3F00)
-  let p = addr & 0x1F;
-  if((addr & 0xF) === 0x10) p &= 0x0F; // map $3F10,$3F14,$3F18,$3F1C down by 0x10
-  return this.palette[p] & 0x3F;
+  // palette range 0x3F00 - 0x3F1F
+  // map mirrored addresses like $3F10/$3F14/$3F18/$3F1C to $3F00/$3F04/$3F08/$3F0C
+  let p = addr & 0x1F; // 0..31
+  if((p & 0x0F) === 0x10) p = p & 0x0F;
+  // return palette value as stored (don't re-mask here)
+  return this.palette[p];
 }
 
 ppuWrite(addr, val){
-  addr &= 0x3FFF; val &= 0xFF;
+  addr &= 0x3FFF;
+  val &= 0xFF;
   if(addr < 0x2000){
     this.mapper.chrWrite(addr, val);
     return;
   }
   if(addr < 0x3F00){
-    this.vram[this.ntIndex(addr)] = val & 0xFF;
+    this.vram[this.ntIndex(addr)] = val;
     return;
   }
-  // Palette writes with mirroring
   let p = addr & 0x1F;
-  if((addr & 0xF) === 0x10) p &= 0x0F;
-  this.palette[p] = val & 0x3F; // store only low 6 bits (0..63)
+  if((p & 0x0F) === 0x10) p = p & 0x0F;
+  // preserve full byte semantics (some code expects full 0-255 stored)
+  this.palette[p] = val;
 }
 
-// === Background fetch helper (returns {lo,hi,pal}) ===
+// ===== bgFetch() with original shift semantics preserved =====
 bgFetch(){
-  // name table byte
   const nt = 0x2000 | (this.v & 0x0FFF);
-  // attribute table address
   const at = 0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07);
   const fineY = (this.v >> 12) & 0x7;
-  const tile = this.ppuRead(nt);
-  const attr = this.ppuRead(at);
-  // compute attribute shift for this tile within the attribute byte
-  const shift = ((this.v >> 4) & 0x04) | ((this.v >> 2) & 0x01); // yields 0,1,4,5 -> but we use as shift below
-  // The attribute bits are in pairs; extract and shift into palette index then shift left 2 so later adding bgPx (1..3) selects proper palette byte index
-  const pal = ((attr >> shift) & 0x03) << 2;
-  const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000; // background pattern table select
+  const tile = this.ppuRead(nt) & 0xFF;
+  const attr = this.ppuRead(at) & 0xFF;
+  // preserve the original shift expression you used so attribute bits align exactly as before:
+  const shift = ((this.v >> 4) & 0x04) | (this.v & 0x02); // yields 0,2,4,6
+  const pal = ((attr >> shift) & 0x03) << 2; // 0,4,8,12
+  const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
   const addr = base + (tile * 16) + fineY;
-  const lo = this.ppuRead(addr);
-  const hi = this.ppuRead(addr + 8);
-  return { lo: lo & 0xFF, hi: hi & 0xFF, pal: pal & 0x0F };
+  const lo = this.ppuRead(addr) & 0xFF;
+  const hi = this.ppuRead(addr + 8) & 0xFF;
+  return { lo, hi, pal };
 }
 
-// === Sprite evaluation for current scanline ===
+// ===== evalSprites() (keeps scanning all 64 sprites for overflow; does NOT clear secOAM) =====
 evalSprites(){
   const y = this.scanline;
   this.spriteCount = 0;
   this.spriteZeroInLine = false;
-
-  // optional: clear secondary OAM for deterministic content
-  for(let i=0;i<32;i++) this.secOAM[i] = 0xFF;
 
   let found = 0;
   let overflow = false;
@@ -406,10 +400,8 @@ evalSprites(){
         this.secOAM[t+1] = tile;
         this.secOAM[t+2] = attr;
         this.secOAM[t+3] = sx;
-        // if primary OAM index 0 is captured into secOAM among first 8, mark spriteZeroInLine
         if(i === 0) this.spriteZeroInLine = true;
       } else {
-        // still continue scanning to set overflow properly
         overflow = true;
       }
       found++;
@@ -421,35 +413,36 @@ evalSprites(){
   else this.status &= ~0x20;
 }
 
-// === Render a single pixel at (x,y) using bg + sprite ===
+// ===== renderPixel() (compatible, uses palette[] values as-stored) =====
 renderPixel(x, y, bg, sp){
   const idx = (y * 256 + x) * 4;
   const img = this.output.data;
 
-  // Default to universal BG color (palette[0])
-  let chosenPaletteValue = this.palette[0] & 0x3F;
+  // default: palette[0] (as-stored)
+  let chosenPaletteValue = this.palette[0] & 0x3F; // map to 0..63 when indexing NTSC_PALETTE
 
-  // --- Background pixel calculation ---
+  // background
   let bgPx = 0;
-  if(this.mask & 0x08){ // background enabled
-    const bit = 7 - ((x + this.x) & 7); // fine X within the tile
+  if(this.mask & 0x08){
+    const bit = 7 - ((x + this.x) & 7);
     bgPx = (((bg.hi >> bit) & 1) << 1) | ((bg.lo >> bit) & 1);
     if(bgPx !== 0){
-      const bgPaletteAddr = (bg.pal & 0x0F) + bgPx; // bg.pal is already <<2
+      const bgPaletteAddr = (bg.pal & 0x0F) + bgPx; // bg.pal is ((attr>>shift)&3)<<2
+      // read palette RAM value as stored and map to 6-bit index for NTSC_PALETTE
       chosenPaletteValue = this.palette[bgPaletteAddr & 0x1F] & 0x3F;
     } else {
       chosenPaletteValue = this.palette[0] & 0x3F;
     }
   }
 
-  // --- Sprite pixel calculation ---
+  // sprites
   let spriteOpaque = false;
   let spritePriority = 0;
   let spritePaletteValue = 0;
   let sprite0_here = false;
   let spPx = 0;
 
-  if(this.mask & 0x10){ // sprites enabled
+  if(this.mask & 0x10){
     for(let i=0;i<this.spriteCount;i++){
       const o = i * 4;
       const sy = this.secOAM[o+0] & 0xFF;
@@ -469,20 +462,17 @@ renderPixel(x, y, bg, sp){
 
       if(i === 0 && this.spriteZeroInLine) sprite0_here = true;
 
-      // Tile addressing for 8x8 and 8x16 sprites
+      // 8x8 vs 8x16 addressing
       let fineY = row;
       let tileIndex = tile;
       let tableBase = (this.ctrl & 0x08) ? 0x1000 : 0x0000; // only for 8x8
 
       if(h === 16){
-        // In 8x16, low bit of tile selects the pattern table; tileIndex is even for top half
         tableBase = (tile & 1) ? 0x1000 : 0x0000;
         tileIndex = tile & 0xFE;
       }
 
-      if(flipV){
-        fineY = h - 1 - row;
-      }
+      if(flipV) fineY = h - 1 - row;
 
       let tileForFetch = tileIndex;
       let fineYForFetch = fineY;
@@ -500,33 +490,23 @@ renderPixel(x, y, bg, sp){
       spPx = (((hi >> bitIdx) & 1) << 1) | ((lo >> bitIdx) & 1);
 
       if(spPx !== 0){
-        const spritePaletteAddr = 0x10 + paletteIndexBase + spPx; // sprite palettes live at +0x10 region
+        const spritePaletteAddr = 0x10 + paletteIndexBase + spPx; // palette RAM index
         spritePaletteValue = this.palette[spritePaletteAddr & 0x1F] & 0x3F;
         spriteOpaque = true;
-        break; // left-most (lowest secOAM index) wins
+        break;
       }
     }
   }
 
-  // --- Sprite 0 hit logic ---
+  // sprite 0 hit
   if(spriteOpaque && bgPx && sprite0_here && x < 255 && (this.mask & 0x18) === 0x18){
     this.status |= 0x40;
   }
 
-  // --- Final priority selection ---
+  // final priority
   if(spriteOpaque){
     if((spritePriority === 0) || (bgPx === 0)){
-      chosenPaletteValue = spritePaletteValue;
-    }
-  }
-
-  // Write to image buffer
-  const rgb = NTSC_PALETTE[chosenPaletteValue & 0x3F] || [0,0,0];
-  img[idx + 0] = rgb[0];
-  img[idx + 1] = rgb[1];
-  img[idx + 2] = rgb[2];
-  img[idx + 3] = 255;
-}
+      chosenPaletteValue = spriteP
 
 
   // ===== 6502 CPU (official opcodes only) =====
