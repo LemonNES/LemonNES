@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NES Input Settings</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Roboto, sans-serif;
+      background: #1e1e1e;
+      color: #f0f0f0;
+      display: flex;
+      justify-content: center;
+      padding: 40px;
+    }
+
+    .settings-container {
+      background: #2b2b2b;
+      padding: 30px 40px;
+      border-radius: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      width: 600px;
+      max-width: 90%;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 26px;
+      margin-bottom: 30px;
+      color: #ffcc00;
+    }
+
+    .player {
+      margin-bottom: 40px;
+    }
+
+    h2 {
+      font-size: 20px;
+      margin-bottom: 15px;
+      border-bottom: 1px solid #444;
+      padding-bottom: 5px;
+      color: #ffcc00;
+    }
+
+    .mapping {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #333;
+      font-size: 15px;
+    }
+
+    .mapping span {
+      font-family: monospace;
+      background: #3a3a3a;
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-left: 10px;
+      color: #ddd;
+    }
+
+    button {
+      background: #444;
+      color: #f0f0f0;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.2s;
+      font-size: 14px;
+    }
+
+    button:hover {
+      background: #666;
+    }
+
+    button.waiting {
+      background: #d9534f;
+      color: white;
+    }
+
+    .reset {
+      display: block;
+      margin-top: 15px;
+      background: #333;
+      color: #ff6666;
+      font-weight: bold;
+      width: 100%;
+      text-align: center;
+      transition: background 0.2s;
+    }
+
+    .reset:hover {
+      background: #444;
+    }
+
+    .reset-all {
+      margin-top: 30px;
+      background: #800000;
+      color: #fff;
+      font-weight: bold;
+      width: 100%;
+      padding: 10px;
+      font-size: 15px;
+    }
+
+    .reset-all:hover {
+      background: #a00000;
+    }
+  </style>
+</head>
+<body>
+  <div class="settings-container">
+    <h1>🎮 NES Input Settings</h1>
+
+    <div class="player" id="p1">
+      <h2>Player 1</h2>
+      <div class="mapping">A <span id="p1-A">KeyZ</span> <button data-player="1" data-btn="A">Remap</button></div>
+      <div class="mapping">B <span id="p1-B">KeyX</span> <button data-player="1" data-btn="B">Remap</button></div>
+      <div class="mapping">Select <span id="p1-Select">ShiftLeft</span> <button data-player="1" data-btn="Select">Remap</button></div>
+      <div class="mapping">Start <span id="p1-Start">Enter</span> <button data-player="1" data-btn="Start">Remap</button></div>
+      <div class="mapping">Up <span id="p1-Up">ArrowUp</span> <button data-player="1" data-btn="Up">Remap</button></div>
+      <div class="mapping">Down <span id="p1-Down">ArrowDown</span> <button data-player="1" data-btn="Down">Remap</button></div>
+      <div class="mapping">Left <span id="p1-Left">ArrowLeft</span> <button data-player="1" data-btn="Left">Remap</button></div>
+      <div class="mapping">Right <span id="p1-Right">ArrowRight</span> <button data-player="1" data-btn="Right">Remap</button></div>
+      <button class="reset" id="reset-p1">Reset Player 1 to Default</button>
+    </div>
+
+    <div class="player" id="p2">
+      <h2>Player 2</h2>
+      <div class="mapping">A <span id="p2-A">Numpad1</span> <button data-player="2" data-btn="A">Remap</button></div>
+      <div class="mapping">B <span id="p2-B">Numpad2</span> <button data-player="2" data-btn="B">Remap</button></div>
+      <div class="mapping">Select <span id="p2-Select">Numpad0</span> <button data-player="2" data-btn="Select">Remap</button></div>
+      <div class="mapping">Start <span id="p2-Start">NumpadEnter</span> <button data-player="2" data-btn="Start">Remap</button></div>
+      <div class="mapping">Up <span id="p2-Up">Numpad8</span> <button data-player="2" data-btn="Up">Remap</button></div>
+      <div class="mapping">Down <span id="p2-Down">Numpad5</span> <button data-player="2" data-btn="Down">Remap</button></div>
+      <div class="mapping">Left <span id="p2-Left">Numpad4</span> <button data-player="2" data-btn="Left">Remap</button></div>
+      <div class="mapping">Right <span id="p2-Right">Numpad6</span> <button data-player="2" data-btn="Right">Remap</button></div>
+      <button class="reset" id="reset-p2">Reset Player 2 to Default</button>
+    </div>
+
+    <button class="reset-all" id="reset-all">Reset ALL Players to Default</button>
+  </div>
+
+  <script type="module" src="inputSettings.js"></script>
+</body>
+</html>
