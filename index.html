@@ -72,17 +72,17 @@
   <iframe src="src/inputsettings.html"></iframe>
 
   <!-- Emulator scripts -->
-  <script type="module" src="src/cpu.js"></script>
-  <script type="module" src="src/memory.js"></script>
-  <script type="module" src="src/ppu.js"></script>
-  <script type="module" src="src/apu.js"></script>
-  <script type="module" src="src/input.js"></script>
+  <script type="module" src="cpu.js"></script>
+  <script type="module" src="memory.js"></script>
+  <script type="module" src="ppu.js"></script>
+  <script type="module" src="apu.js"></script>
+  <script type="module" src="input.js"></script>
   <script type="module">
-    import CPU from './src/cpu.js';
-    import Memory from './src/memory.js';
-    import PPU from './src/ppu.js';
-    import APU from './src/apu.js';
-    import { Input } from './src/input.js';
+    import CPU from './cpu.js';
+    import Memory from './memory.js';
+    import PPU from './ppu.js';
+    import APU from './apu.js';
+    import { Input } from './input.js';
 
     const canvas = document.getElementById('screen');
     const ctx = canvas.getContext('2d');
