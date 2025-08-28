@@ -1,51 +1,79 @@
 // ppu.js
-// Cycle-stepped NES PPU (visible background + sprites, sprite-0 hit, NMI at vblank).
-// This is a reasonably accurate MVP — not every PPU timing edge-case, but
-// good for many early games and homebrew.
+// Cycle-stepped NES PPU with full-ish background fetch pipeline, sprite evaluation (8-sprite limit),
+// sprite pattern fetch, sprite-0 hit, vblank/NMI, and palette mirroring.
+// Exports PPU class with methods expected by the Bus/CPU wiring.
 
 export class PPU {
   constructor() {
-    // Scroll / addressing registers
-    this.v = 0;   // current VRAM address (15 bits)
-    this.t = 0;   // temporary VRAM address (15 bits)
-    this.x = 0;   // fine X scroll (3 bits)
-    this.w = 0;   // write toggle (0/1)
+    // scroll registers
+    this.v = 0; // current VRAM address (15 bits)
+    this.t = 0; // temporary VRAM address (15 bits)
+    this.x = 0; // fine X (3 bits)
+    this.w = 0; // write toggle
 
-    // Control / mask / status
-    this.ctrl = 0;   // $2000
-    this.mask = 0;   // $2001
+    // ctrl/mask/status
+    this.ctrl = 0;  // $2000
+    this.mask = 0;  // $2001
     this.status = 0; // $2002
 
     // OAM
-    this.oam = new Uint8Array(256);   // primary OAM
-    this.secOAM = new Uint8Array(32); // secondary OAM copy for scanline (8 sprites * 4 bytes)
+    this.oam = new Uint8Array(256);
     this.oamaddr = 0;
-
-    // Internal memory
-    this.vram = new Uint8Array(0x800); // 2KB internal nametables
-    this.palette = new Uint8Array(32); // palette RAM
-
-    // Sprite state
+    this.secOAM = new Uint8Array(32); // secondary OAM (8 sprites * 4 bytes)
     this.spriteCount = 0;
     this.spriteZeroInLine = false;
-    this.spriteZeroHit = false;
 
-    // PPU timing
-    this.cycle = 0;     // 0-340
-    this.scanline = 261; // pre-render line (261), visible 0-239, vblank 241-260
-    this.frame = 0;
-    this.nmi = false;   // set to true when CPU needs to run NMI
+    // VRAM / palette
+    this.vram = new Uint8Array(0x800); // 2KB nametable
+    this.palette = new Uint8Array(32);
 
-    // Cartridge/mapper link (set by connectCart)
+    // cartridge / mapper connection (set by connectCart)
     this.cart = null;
     this.mapper = null;
     this.mirror = 'horizontal';
 
-    // Rendering target
+    // canvas / framebuffer
     this.canvas = null;
     this.ctx = null;
     this.imageData = null;
-    this.fb = null; // Uint32Array backing framebuffer (RGBA)
+    this.fb = null; // Uint32Array view
+
+    // pipeline state
+    this.cycle = 0;       // 0..340
+    this.scanline = 261;  // pre-render start
+    this.frame = 0;
+    this.nmi = false;
+
+    // internal fetch pipeline latches / shift regs
+    this.nameTableByte = 0;
+    this.attrTableByte = 0;
+    this.patternLo = 0;
+    this.patternHi = 0;
+
+    this.bgShiftLo = 0;  // 16-bit shift register
+    this.bgShiftHi = 0;
+    this.attrShiftLo = 0; // attribute shift latches (two bits repeated)
+    this.attrShiftHi = 0;
+
+    this.nextTileFineX = 0; // fine X (copied from x when rendering)
+    this.bgLatch = { lo: 0, hi: 0, pal: 0 };
+
+    // sprite pipeline storage (for rendering)
+    this.spriteShiftsLo = new Uint8Array(8); // per-sprite pattern lo shift
+    this.spriteShiftsHi = new Uint8Array(8);
+    this.spriteX = new Uint8Array(8);
+    this.spriteAttr = new Uint8Array(8);
+    this.spriteY = new Uint8Array(8);
+    this.spriteIndices = new Uint8Array(8);
+
+    // temporary values used during eval/fetch
+    this.scanlineSprites = []; // indexes of sprites found this scanline
+
+    // buffered read (for $2007)
+    this.buffered = 0;
+
+    // precompute palette -> RGBA mapping
+    this.paletteRGB = new Array(64).fill([0,0,0]);
   }
 
   attachCanvas(canvas) {
@@ -53,37 +81,43 @@ export class PPU {
     this.ctx = canvas.getContext('2d', { alpha: false });
     this.imageData = this.ctx.createImageData(256, 240);
     this.fb = new Uint32Array(this.imageData.data.buffer);
+    // init paletteRGB
+    for (let i=0;i<NTSC_PALETTE.length;i++) {
+      const [r,g,b] = NTSC_PALETTE[i];
+      // little-endian RGBA (Uint32): A<<24 | B<<16 | G<<8 | R
+      this.paletteRGB[i] = (255<<24) | (b<<16) | (g<<8) | r;
+    }
   }
 
   connectCart(cart) {
     this.cart = cart;
-    // mapper object must implement chrRead(addr) & chrWrite(addr,val)
-    this.mapper = cart && cart.mapperInstance ? cart.mapperInstance : cart;
-    // mirror string (horizontal/vertical/four)
+    this.mapper = cart.mapperInstance ? cart.mapperInstance : cart;
     this.mirror = cart.mirror || 'horizontal';
   }
 
   reset() {
     this.v = this.t = this.x = this.w = 0;
     this.ctrl = this.mask = this.status = 0;
-    this.oamaddr = 0;
     this.oam.fill(0);
+    this.oamaddr = 0;
     this.secOAM.fill(0xFF);
-    this.vram.fill(0);
-    this.palette.fill(0);
-    this.cycle = 0;
     this.scanline = 261;
+    this.cycle = 0;
     this.frame = 0;
     this.nmi = false;
+    this.buffered = 0;
+    this.bgShiftLo = this.bgShiftHi = 0;
+    this.attrShiftLo = this.attrShiftHi = 0;
+    this.nameTableByte = this.attrTableByte = this.patternLo = this.patternHi = 0;
     this.spriteCount = 0;
     this.spriteZeroInLine = false;
-    this.spriteZeroHit = false;
+    this.scanlineSprites = [];
+    for (let i=0;i<8;i++){ this.spriteShiftsLo[i]=0; this.spriteShiftsHi[i]=0; this.spriteX[i]=0; this.spriteAttr[i]=0; this.spriteY[i]=0; this.spriteIndices[i]=0; }
   }
 
-  // CPU register interface ($2002, $2004, $2007; $2000/$2001 writes; $2005/$2006 writes)
+  // CPU-visible register reads ($2002, $2004, $2007)
   read(addr) {
-    // CPU read at 0x2002 / 0x2004 / 0x2007 mapped to this method by Bus
-    switch (addr & 7) {
+    switch(addr & 7) {
       case 2: // $2002 PPUSTATUS
         {
           const res = (this.status & 0xE0) | (this.buffered & 0x1F);
@@ -93,14 +127,13 @@ export class PPU {
         }
       case 4: // $2004 OAMDATA
         return this.oam[this.oamaddr & 0xFF];
-      case 7: // $2007 PPUDATA
+      case 7: // $2007 PPUDATA (buffered)
         {
-          // Read from VRAM bus with buffered read behavior
-          const val = this.ppuRead(this.v & 0x3FFF);
-          // If address is in palette range, return directly and update buffer differently
-          if ((this.v & 0x3FFF) >= 0x3F00) {
-            // palette reads are not buffered
-            this.buffered = this.ppuRead((this.v - 0x1000) & 0x3FFF); // keep buffer sane
+          const addr14 = this.v & 0x3FFF;
+          const val = this.ppuRead(addr14);
+          // palette reads are not buffered
+          if (addr14 >= 0x3F00) {
+            this.buffered = this.ppuRead(addr14 - 0x1000);
             this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
             return val;
           } else {
@@ -110,17 +143,17 @@ export class PPU {
             return ret;
           }
         }
-      default:
-        return 0;
+      default: return 0;
     }
   }
 
+  // CPU-visible register writes ($2000-$2007)
   write(addr, val) {
-    // CPU writes to PPU registers
-    switch (addr & 7) {
+    val &= 0xFF;
+    switch(addr & 7) {
       case 0: // $2000 PPUCTRL
         this.ctrl = val;
-        // t: .....BA.. ........ = d: ......BA
+        // t: bits 10-11 = nametable select (d0-d1)
         this.t = (this.t & 0xF3FF) | ((val & 0x03) << 10);
         break;
       case 1: // $2001 PPUMASK
@@ -135,11 +168,11 @@ export class PPU {
         break;
       case 5: // $2005 PPUSCROLL
         if (this.w === 0) {
-          this.x = val & 7;
-          this.t = (this.t & 0x7FE0) | (val >> 3);
+          this.x = val & 0x07;
+          this.t = (this.t & 0x7FE0) | ((val & 0xF8) >> 3);
           this.w = 1;
         } else {
-          this.t = (this.t & 0x0C1F) | ((val & 7) << 12) | ((val & 0xF8) << 2);
+          this.t = (this.t & 0x0C1F) | ((val & 0x07) << 12) | ((val & 0xF8) << 2);
           this.w = 0;
         }
         break;
@@ -160,68 +193,61 @@ export class PPU {
     }
   }
 
-  // OAM DMA (write 256 bytes starting at OAMADDR)
-  doDMA(buf) {
-    for (let i = 0; i < 256; i++) {
-      this.oam[(this.oamaddr + i) & 0xFF] = buf[i];
-    }
-  }
-
-  // low-level PPU memory access (pattern tables, nametables, palette)
+  // low-level PPU memory access
   ppuRead(addr) {
     addr &= 0x3FFF;
     if (addr < 0x2000) {
+      // pattern table via mapper.chrRead
       return this.mapper && this.mapper.chrRead ? this.mapper.chrRead(addr & 0x1FFF) : 0;
     } else if (addr < 0x3F00) {
-      // nametable read with mirroring
       const idx = this.ntIndex(addr);
-      return this.vram[idx];
+      return this.vram[idx & 0x7FF];
     } else {
-      // palette read (mirroring of some entries)
+      // palette range 0x3F00 - 0x3FFF mirrored every 32 bytes
       const a = 0x3F00 + (addr & 0x1F);
-      const idx = (a - 0x3F00) & 0x1F;
-      // palette RAM index mirrors for addresses like 0x3F10 == 0x3F00
-      const mirrorMap = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31];
-      const palIdx = idx & 0x1F;
-      return this.palette[palIdx] & 0x3F;
+      let idx = a & 0x1F;
+      // mirror the background color addresses (0x3F10/0x3F14/... mirror 0x3F00/0x3F04/...)
+      if ((idx & 0x13) === 0x10) idx &= ~0x10;
+      return this.palette[idx] & 0x3F;
     }
   }
 
   ppuWrite(addr, val) {
-    addr &= 0x3FFF;
-    val &= 0xFF;
+    addr &= 0x3FFF; val &= 0xFF;
     if (addr < 0x2000) {
       if (this.mapper && this.mapper.chrWrite) this.mapper.chrWrite(addr & 0x1FFF, val);
     } else if (addr < 0x3F00) {
       const idx = this.ntIndex(addr);
-      this.vram[idx] = val;
+      this.vram[idx & 0x7FF] = val;
     } else {
-      const palIdx = (addr - 0x3F00) & 0x1F;
-      // mirrors: writes to 0x3F10/0x3F14/... map to 0x3F00/...
-      const mirror = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15, 16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31];
-      this.palette[palIdx] = val & 0x3F;
+      const a = 0x3F00 + (addr & 0x1F);
+      let idx = a & 0x1F;
+      if ((idx & 0x13) === 0x10) idx &= ~0x10;
+      this.palette[idx] = val & 0x3F;
     }
   }
 
-  // translate 0x2000..0x2FFF nametable addr into vram index depending on mirroring
+  // name table index mapping with mirroring
   ntIndex(addr) {
-    const a = addr & 0x0FFF; // offset into name table space
-    const nt = (a >> 10) & 3; // 0-3
+    const a = addr & 0x0FFF;
+    const nt = (a >> 10) & 3;
     const off = a & 0x03FF;
     if (this.mirror === 'vertical') {
-      // nt 0,2 -> first; 1,3 -> second
       return ((nt & 1) * 0x400) + off;
     } else if (this.mirror === 'horizontal') {
-      // nt 0,1 -> first; 2,3 -> second
       return (((nt >> 1) & 1) * 0x400) + off;
-    } else if (this.mirror === 'four') {
-      // four-screen: direct mapping (we don't implement extra RAM here; fallback to first)
+    } else {
+      // four-screen fallback
       return off;
     }
-    return off;
   }
 
-  // scrolling helpers (H/V increment behavior)
+  // OAM DMA
+  doDMA(buf) {
+    for (let i=0;i<256;i++) this.oam[(this.oamaddr + i) & 0xFF] = buf[i];
+  }
+
+  // scrolling helpers
   incCoarseX() {
     if ((this.v & 0x001F) === 31) {
       this.v &= ~0x001F;
@@ -257,208 +283,353 @@ export class PPU {
     this.v = (this.v & ~0x7BE0) | (this.t & 0x7BE0);
   }
 
-  // Background fetch helpers: fetch tile / attr / pattern bytes for current v
-  bgFetchForX() {
-    // This is a simplified per-8-dot fetch that returns pattern low/high and palette bits.
-    const ntAddr = 0x2000 | (this.v & 0x0FFF);
-    const atAddr = 0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07);
-    const fineY = (this.v >> 12) & 7;
-    const tile = this.ppuRead(ntAddr);
-    const attr = this.ppuRead(atAddr);
-    const shift = (((this.v >> 4) & 4) | (this.v & 2));
-    const pal = ((attr >> shift) & 3) << 2;
-    const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
-    const addrLo = base + tile * 16 + fineY;
-    const addrHi = addrLo + 8;
-    const lo = this.ppuRead(addrLo);
-    const hi = this.ppuRead(addrHi);
-    return { lo, hi, pal };
+  // background fetch pipeline - invoked at specific cycles (see step())
+  fetchName() {
+    const addr = 0x2000 | (this.v & 0x0FFF);
+    this.nameTableByte = this.ppuRead(addr);
   }
 
-  // Evaluate sprites for current scanline (populates secOAM)
-  evalSprites() {
+  fetchAttr() {
+    const at = 0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07);
+    this.attrTableByte = this.ppuRead(at);
+    // compute palette bits
+    const shift = ((this.v >> 4) & 4) | (this.v & 2);
+    this.bgLatch.pal = ((this.attrTableByte >> shift) & 3) << 2;
+  }
+
+  fetchPatternLow() {
+    const fineY = (this.v >> 12) & 7;
+    const table = (this.ctrl & 0x10) ? 1 : 0; // bg pattern table select
+    const tile = this.nameTableByte & 0xFF;
+    const addr = (table * 0x1000) + (tile * 16) + fineY;
+    this.patternLo = this.ppuRead(addr);
+  }
+
+  fetchPatternHigh() {
+    const fineY = (this.v >> 12) & 7;
+    const table = (this.ctrl & 0x10) ? 1 : 0;
+    const tile = this.nameTableByte & 0xFF;
+    const addr = (table * 0x1000) + (tile * 16) + fineY + 8;
+    this.patternHi = this.ppuRead(addr);
+  }
+
+  // Load latches into shift registers at cycle boundary (every 8 pixels)
+  loadBGShiftRegisters() {
+    // load pattern bytes (they will be shifted 8..0 in real PPU as pixels are consumed)
+    this.bgShiftLo = ((this.bgShiftLo & 0xFF) | (this.patternLo << 8)) & 0xFFFF;
+    this.bgShiftHi = ((this.bgShiftHi & 0xFF) | (this.patternHi << 8)) & 0xFFFF;
+    // attribute uses single-bit latches that are expanded to full 8-bit masks
+    const pal = this.bgLatch.pal & 0xFF;
+    // create 8-bit-wide attribute "streams"
+    const lo = (pal & 0x01) ? 0xFF : 0x00;
+    const hi = (pal & 0x02) ? 0xFF : 0x00;
+    this.attrShiftLo = ((this.attrShiftLo & 0xFF) | (lo << 8)) & 0xFFFF;
+    this.attrShiftHi = ((this.attrShiftHi & 0xFF) | (hi << 8)) & 0xFFFF;
+  }
+
+  // Sprite evaluation (scanline -> secOAM)
+  evaluateSprites() {
     const y = this.scanline;
+    this.scanlineSprites = [];
     this.spriteCount = 0;
     this.spriteZeroInLine = false;
-    const spriteHeight = (this.ctrl & 0x20) ? 16 : 8;
-
-    // initialize secOAM with 0xFF
-    for (let i = 0; i < 32; i++) this.secOAM[i] = 0xFF;
-
-    for (let i = 0; i < 64; i++) {
+    // clear secOAM
+    for (let i=0;i<32;i++) this.secOAM[i] = 0xFF;
+    for (let i=0;i<64;i++) {
       const o = i * 4;
       const sy = this.oam[o];
-      const tile = this.oam[o + 1];
-      const attr = this.oam[o + 2];
-      const sx = this.oam[o + 3];
+      const tile = this.oam[o+1];
+      const attr = this.oam[o+2];
+      const sx = this.oam[o+3];
+      const h = (this.ctrl & 0x20) ? 16 : 8;
       const row = y - sy;
-      if (row >= 0 && row < spriteHeight) {
+      if (row >= 0 && row < h) {
         if (this.spriteCount < 8) {
+          const dest = this.spriteCount * 4;
+          this.secOAM[dest+0] = sy;
+          this.secOAM[dest+1] = tile;
+          this.secOAM[dest+2] = attr;
+          this.secOAM[dest+3] = sx;
           if (i === 0) this.spriteZeroInLine = true;
-          const base = this.spriteCount * 4;
-          this.secOAM[base + 0] = sy;
-          this.secOAM[base + 1] = tile;
-          this.secOAM[base + 2] = attr;
-          this.secOAM[base + 3] = sx;
         }
         this.spriteCount++;
         if (this.spriteCount === 9) {
-          // set sprite overflow flag (note: hardware sets it differently in some cases,
-          // but this is good-enough for MVP)
+          // set overflow flag (approximation used by many emulators)
           this.status |= 0x20;
           break;
         }
       }
     }
+    // after filling secOAM we will fetch pattern bytes for these sprites
+    // populate per-sprite registers (we'll shift them as pixels are rendered)
+    for (let i=0;i<8;i++) {
+      const base = i*4;
+      const sy = this.secOAM[base+0];
+      if (sy === 0xFF) {
+        this.spriteY[i] = 0xFF;
+        this.spriteX[i] = 0x00;
+        this.spriteAttr[i] = 0;
+        this.spriteShiftsLo[i] = 0;
+        this.spriteShiftsHi[i] = 0;
+        this.spriteIndices[i] = 0xFF;
+        continue;
+      }
+      const tile = this.secOAM[base+1];
+      const attr = this.secOAM[base+2];
+      const sx = this.secOAM[base+3];
+      this.spriteY[i] = sy;
+      this.spriteAttr[i] = attr;
+      this.spriteX[i] = sx;
+      this.spriteIndices[i] = tile;
+      // pattern fetch will happen in fetch cycles 257..320 (we do actual reads during step)
+      this.spriteShiftsLo[i] = 0;
+      this.spriteShiftsHi[i] = 0;
+    }
   }
 
-  // Render a single pixel using fetched BG info and sprite evaluation
-  renderPixel(x, y, bgLatch) {
-    // Background pixel extract
+  // Fetch sprite pattern bytes for secondary OAM (called during cycles 257..320)
+  fetchSpritePatterns() {
+    const spriteHeight = (this.ctrl & 0x20) ? 16 : 8;
+    for (let i=0;i<8;i++) {
+      if (this.spriteY[i] === 0xFF) {
+        this.spriteShiftsLo[i] = 0;
+        this.spriteShiftsHi[i] = 0;
+        continue;
+      }
+      const row = this.scanline - this.spriteY[i];
+      let tile = this.spriteIndices[i];
+      let table = (this.ctrl & 0x08) ? 1 : 0; // sprite pattern table bit (when 8x8)
+      let fineY = row & 0x07;
+      if (spriteHeight === 16) {
+        // 8x16: tile low bit selects the table, top bit of tile handled specially
+        table = tile & 1;
+        tile = tile & 0xFE;
+        // if row >=8 then second tile
+        if (row >= 8) {
+          tile = tile + 1;
+          fineY = row - 8;
+        }
+      } else {
+        // if vertical flip, adjust fineY
+      }
+
+      // handle vertical flip
+      const flipV = (this.spriteAttr[i] >> 7) & 1;
+      const flipH = (this.spriteAttr[i] >> 6) & 1;
+      let fy = flipV ? (7 - fineY) : fineY;
+
+      const addrLo = (table * 0x1000) + (tile * 16) + fy;
+      const addrHi = addrLo + 8;
+      let lo = this.ppuRead(addrLo);
+      let hi = this.ppuRead(addrHi);
+
+      // handle horizontal flip: we will reverse bits when we shift them out per-pixel
+      if (flipH) {
+        lo = reverseByte(lo);
+        hi = reverseByte(hi);
+      }
+      this.spriteShiftsLo[i] = lo;
+      this.spriteShiftsHi[i] = hi;
+    }
+  }
+
+  // Render a single pixel from bg + sprites at (x,y)
+  renderPixel(x,y) {
+    const maskedBg = (this.mask & 0x08) !== 0;
+    const maskedSprites = (this.mask & 0x10) !== 0;
+
+    // Background pixel
     let bgPixel = 0;
-    let bgPal = 0;
-    if (this.mask & 0x08) { // show background
-      const bit = 7 - ((x + this.x) & 7);
-      bgPixel = (((bgLatch.hi >> bit) & 1) << 1) | ((bgLatch.lo >> bit) & 1);
-      if (bgPixel) bgPal = bgLatch.pal + bgPixel;
+    let bgPalette = 0;
+    if (maskedBg) {
+      const bit = 15 - (this.x + ((x & 7))) ; // relative to shift reg? we'll compute using fine X
+      // Instead of bit math above, use shifting from bgShift registers:
+      const shift = 15 - this.x; // we will shift left each cycle; typical technique is to read top bits
+      const lo = (this.bgShiftLo >> (8 - this.x)) & 0xFF; // easier: calculate pixel bits by indexing into shift reg
+      // A simpler and correct approach used below:
+      const bgLo = (this.bgShiftLo >> (15 - x % 16)) & 1; // this attempt is brittle; use canonical method below
+      // Use canonical extraction: the next pixel comes from high bits of shift registers >> (15 - x)
+      // Compute bitIndex = 15 - (this.x)
+      // But to keep things robust, instead compute pixel as follows:
+      const bitIndex = 15 - this.x;
+      // extract the two bitplanes for the current pixel (use >> (15 - this.x))
+      const planeLo = (this.bgShiftLo >> (15 - this.x)) & 1;
+      const planeHi = (this.bgShiftHi >> (15 - this.x)) & 1;
+      const palLo = (this.attrShiftLo >> (15 - this.x)) & 1;
+      const palHi = (this.attrShiftHi >> (15 - this.x)) & 1;
+      bgPixel = (planeHi << 1) | planeLo;
+      bgPalette = (palHi << 1) | palLo;
+      bgPalette = (bgPalette << 2); // palette high bits
     }
 
-    // Sprite pixel: test secOAM sprites in order (0..spriteCount-1)
+    // Sprite pixel: find first non-zero sprite pixel whose X counter == 0
     let spritePixel = 0;
-    let spritePalette = 0;
+    let spritePal = 0;
     let spritePriority = 0;
-    let sprite0 = false;
+    let spriteIsZero = false;
 
-    if (this.mask & 0x10) { // show sprites
-      for (let i = 0; i < Math.min(this.spriteCount, 8); i++) {
-        const b = i * 4;
-        const sy = this.secOAM[b + 0];
-        const tile = this.secOAM[b + 1];
-        const attr = this.secOAM[b + 2];
-        const sx = this.secOAM[b + 3];
-        const h = (this.ctrl & 0x20) ? 16 : 8;
-        if (x < sx || x >= sx + 8) continue;
-        const row = y - sy;
-        if (row < 0 || row >= h) continue;
-
-        const flipV = (attr >> 7) & 1;
-        const flipH = (attr >> 6) & 1;
-        const pal = ((attr & 3) + 4) << 2;
-        const priority = (attr >> 5) & 1;
-        if (this.spriteZeroInLine && i === 0) sprite0 = true;
-
-        // compute fineY / base for sprite tile
-        let fineY = row;
-        if (flipV) fineY = (h - 1) - row;
-        const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
-        let tileIndex = tile;
-        if (h === 16) {
-          // 8x16 tiles: bit0 of ctrl selects pattern table for each tile.
-          // tileIndex & 1 selects table, tileIndex >> 1 selects tile number
-          const table = tile & 1;
-          tileIndex = (tile & 0xFE);
-          // for 8x16, tile numbering is more involved; for MVP this approximates common carts.
-        }
-        const addrLo = base + tileIndex * 16 + fineY;
-        const addrHi = addrLo + 8;
-        const lo = this.ppuRead(addrLo);
-        const hi = this.ppuRead(addrHi);
-
-        const bitIndex = flipH ? (x - sx) : (7 - (x - sx));
-        const spPx = (((hi >> bitIndex) & 1) << 1) | ((lo >> bitIndex) & 1);
-        if (spPx) {
-          spritePixel = spPx;
-          spritePalette = pal;
-          spritePriority = priority;
-          break;
+    if (maskedSprites) {
+      for (let s = 0; s < 8; s++) {
+        if (this.spriteY[s] === 0xFF) continue; // empty
+        if (this.spriteX[s] === 0) {
+          // this sprite aligned with current x; get its top-bit of shifts
+          const lo = (this.spriteShiftsLo[s] >> 7) & 1;
+          const hi = (this.spriteShiftsHi[s] >> 7) & 1;
+          const px = (hi << 1) | lo;
+          if (px !== 0) {
+            spritePixel = px;
+            const attr = this.spriteAttr[s];
+            spritePal = ((attr & 3) + 4) << 2;
+            spritePriority = (attr >> 5) & 1;
+            if (this.spriteZeroInLine && s === 0) spriteIsZero = true;
+            break;
+          }
         }
       }
     }
 
-    // Sprite 0 hit: if both non-zero and sprite is sprite0 and x < 255, set flag
-    if (spritePixel && bgPixel && sprite0 && x < 255) {
+    // sprite-0 hit: when both bg and sprite non-zero and sprite is sprite0 and x < 255, set flag
+    if (spritePixel && bgPixel && spriteIsZero && x < 255) {
       this.status |= 0x40;
     }
 
-    // final pixel selection: sprite priority bit == 0 -> sprite in front unless bgPx==0
+    // final color selection
     let colorIndex = 0;
     if (spritePixel && (spritePriority === 0 || bgPixel === 0)) {
-      colorIndex = 0x10 + spritePalette + spritePixel;
+      colorIndex = 0x10 | spritePal | (spritePixel & 3);
     } else if (bgPixel) {
-      colorIndex = 0x10 + bgPal;
+      colorIndex = 0x10 | (bgPalette) | (bgPixel & 3);
     } else {
-      colorIndex = this.palette[0] & 0x3F; // backdrop color from palette[0]
+      colorIndex = this.palette[0] & 0x3F;
     }
 
-    const rgb = NTSC_PALETTE[colorIndex & 0x3F];
-    const idx = y * 256 + x;
-    this.fb[idx] = (255 << 24) | (rgb[2] << 16) | (rgb[1] << 8) | (rgb[0]); // little-endian RGBA
+    const rgbIndex = colorIndex & 0x3F;
+    this.fb[y*256 + x] = this.paletteRGB[rgbIndex] || 0xFF000000;
   }
 
-  // Place framebuffer onto canvas
+  // shift background registers every cycle during visible pixels (but only when rendering enabled)
+  stepShifters() {
+    if (this.mask & 0x08) {
+      this.bgShiftLo = (this.bgShiftLo << 1) & 0xFFFF;
+      this.bgShiftHi = (this.bgShiftHi << 1) & 0xFFFF;
+      this.attrShiftLo = (this.attrShiftLo << 1) & 0xFFFF;
+      this.attrShiftHi = (this.attrShiftHi << 1) & 0xFFFF;
+    }
+    // shift sprite shifts
+    if (this.mask & 0x10) {
+      for (let i=0;i<8;i++) {
+        if (this.spriteX[i] === 0) {
+          this.spriteShiftsLo[i] = (this.spriteShiftsLo[i] << 1) & 0xFF;
+          this.spriteShiftsHi[i] = (this.spriteShiftsHi[i] << 1) & 0xFF;
+        } else {
+          // decrease X counter until 0
+          if (this.spriteX[i] > 0) this.spriteX[i]--;
+        }
+      }
+    }
+  }
+
+  // Put framebuffer to canvas
   renderToCanvas() {
     if (!this.ctx || !this.imageData) return;
     this.ctx.putImageData(this.imageData, 0, 0);
   }
 
-  // One PPU cycle step (call this 3x per CPU cycle)
+  // Primary PPU cycle step (call 3x per CPU cycle in main loop)
   step() {
-    // pre-render scanline 261: clear flags and prepare for frame
-    if (this.scanline === 261) {
-      if (this.cycle === 1) {
-        this.status &= ~(0x80 | 0x40 | 0x20); // clear VBlank, sprite0hit, sprite overflow
-        this.spriteZeroHit = false;
-      }
-      // during cycles 280-304, if rendering is enabled, copy vertical bits from t to v
-      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {
-        this.copyY();
-      }
+    // Pre-render line 261 behavior: clear flags at cycle 1
+    if (this.scanline === 261 && this.cycle === 1) {
+      this.status &= ~(0x80 | 0x40 | 0x20); // clear VBlank, sprite0, overflow
+      this.spriteZeroInLine = false;
     }
 
-    // Visible scanlines
-    if (this.scanline >= 0 && this.scanline <= 239) {
-      if (this.cycle === 0) {
-        // idle
-      } else if (this.cycle === 1) {
-        // sprite evaluation for this scanline
-        if (this.mask & 0x10) this.evalSprites();
-      }
+    // Visible region: 0..239 lines; cycles 1..256 visible dots
+    const renderingEnabled = (this.mask & 0x18) !== 0; // either bg or sprite enabled
 
-      // Visible pixels: cycles 1..256 are visible pixels (1-based)
+    // Visible scanlines: fetch background & sprites on proper cycles
+    if (this.scanline >= 0 && this.scanline <= 239) {
+      // cycles 1..256: pixel rendering
       if (this.cycle >= 1 && this.cycle <= 256) {
-        // on every 8-dot boundary we fetch tile data; simplified: do a bgFetch per pixel
-        // To balance correctness & simplicity, perform a bgFetch at cycles where we need it.
-        if ((this.cycle & 7) === 1) {
-          this.bgLatch = this.bgFetchForX();
+        // On each dot we render pixel then shift registers
+        // But per canonical pipeline, fetches happen on specific cycles:
+        // We'll follow the 8-step sequence across cycles (mod 8)
+        const cycleMod8 = this.cycle & 7;
+        // At cycles where background fetches occur:
+        if (cycleMod8 === 1) {
+          this.fetchName();
+        } else if (cycleMod8 === 3) {
+          this.fetchAttr();
+        } else if (cycleMod8 === 5) {
+          this.fetchPatternLow();
+        } else if (cycleMod8 === 7) {
+          this.fetchPatternHigh();
+        } else if (cycleMod8 === 0) {
+          // load into shift registers at end of the 8-dot sequence
+          this.loadBGShiftRegisters();
         }
+
+        // At cycle 1 of this dot, render the pixel (uses current shift regs & fine-x)
         const x = this.cycle - 1;
         const y = this.scanline;
-        this.renderPixel(x, y, this.bgLatch);
-        if ((this.cycle & 7) === 0) {
+        if (renderingEnabled) {
+          // Calculate background fine-X adjusted bits via shifts: we maintain shifts so that the top bit corresponds to next pixel
+          // Render
+          this.renderPixel(x, y);
+        } else {
+          // fill with backdrop color
+          const col = this.palette[0] & 0x3F;
+          this.fb[y*256 + x] = this.paletteRGB[col] || 0xFF000000;
+        }
+        // shift
+        this.stepShifters();
+
+        // increment coarse X every 8 cycles (after load), but simplified: when cycleMod8 === 0 occurs we already loaded and next inc handled below
+        if (cycleMod8 === 0) {
           this.incCoarseX();
         }
       }
 
-      if (this.cycle === 256) {
-        this.incY();
-      }
+      // cycle 257: copy X and evaluate sprites
       if (this.cycle === 257) {
-        this.copyX();
+        if (renderingEnabled) this.copyX();
+        // sprite evaluation and fetches are done here (we'll evaluate and then fetch patterns)
+        if (renderingEnabled) {
+          this.evaluateSprites();
+          // fetch sprite patterns now (this will call mapper/chr reads)
+          this.fetchSpritePatterns();
+          // Initialize sprite X counters and ensure shift registers aligned: spriteShifts are loaded above
+          for (let i=0;i<8;i++) {
+            // spriteX is already set from secOAM during evaluateSprites
+            if (this.spriteY[i] === 0xFF) {
+              this.spriteX[i] = 0xFF;
+            }
+            // note: for rendering we expect spriteX to be an integer >=0; in stepShifters we check ===0
+          }
+        }
+      }
+
+      // cycle 256: increment Y (fine Y handling)
+      if (this.cycle === 256) {
+        if (renderingEnabled) this.incY();
       }
     }
 
-    // End of visible area -> vblank start on scanline 241, cycle 1
-    if (this.scanline === 241 && this.cycle === 1) {
-      this.status |= 0x80; // set VBlank flag
-      // when control bit 7 is set, NMI should fire
-      if (this.ctrl & 0x80) {
-        this.nmi = true;
+    // Pre-render line: cycles 280..304 copy Y if rendering enabled
+    if (this.scanline === 261) {
+      if (this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) {
+        this.copyY();
       }
+    }
+
+    // Enter VBlank at scanline 241 cycle 1
+    if (this.scanline === 241 && this.cycle === 1) {
+      this.status |= 0x80;
+      if (this.ctrl & 0x80) this.nmi = true;
       // push framebuffer to canvas
       this.renderToCanvas();
     }
 
-    // advance cycle/scanline/frame
+    // Advance cycle counters
     this.cycle++;
     if (this.cycle > 340) {
       this.cycle = 0;
@@ -471,7 +642,15 @@ export class PPU {
   }
 }
 
-// Approximate NTSC palette (same as many emulators; each entry is [R,G,B])
+// small helper: reverse bits in a byte (used for sprite H-flip pre-flip)
+function reverseByte(b) {
+  b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4);
+  b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2);
+  b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1);
+  return b & 0xFF;
+}
+
+// NTSC palette (same as earlier)
 const NTSC_PALETTE = [
   [84,84,84],[0,30,116],[8,16,144],[48,0,136],[68,0,100],[92,0,48],[84,4,0],[60,24,0],
   [32,42,0],[8,58,0],[0,64,0],[0,60,0],[0,50,60],[0,0,0],[0,0,0],[0,0,0],
@@ -482,4 +661,3 @@ const NTSC_PALETTE = [
   [236,238,236],[168,204,236],[188,188,236],[212,178,236],[236,174,236],[236,174,212],[236,180,176],[228,196,144],
   [204,210,120],[180,222,120],[168,226,144],[152,226,180],[160,214,228],[160,162,160],[0,0,0],[0,0,0]
 ];
-
