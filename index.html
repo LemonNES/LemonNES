@@ -79,16 +79,37 @@ ctx.putImageData(imageData, 0, 0);
 let nes;              // your NES emulator instance
 let animationId = 0;  // requestAnimationFrame ID for stopping
 
-// ---- Load ROM ----
 document.getElementById("romLoader").addEventListener("change", async (e) => {
   const file = e.target.files[0];
-  if (!file) return;
+  if (!file) {
+    console.warn("No file selected");
+    return;
+  }
 
-  const buffer = await file.arrayBuffer();
-  // assuming your NES class has loadROM(buffer)
-  nes = new NES();
-  nes.loadROM(new Uint8Array(buffer));
-  console.log("ROM loaded:", file.name);
+  console.log("Selected ROM:", file.name);
+
+  try {
+    const buffer = await file.arrayBuffer();
+    const romData = new Uint8Array(buffer);
+    console.log("ROM size:", romData.length, "bytes");
+
+    // Make sure NES class exists
+    if (typeof NES === "undefined") {
+      console.error("NES class not found! Did you include your emulator script?");
+      return;
+    }
+
+    nes = new NES();
+    if (typeof nes.loadROM !== "function") {
+      console.error("nes.loadROM() is missing. Check your emulator code.");
+      return;
+    }
+
+    nes.loadROM(romData);
+    console.log("ROM loaded into emulator");
+  } catch (err) {
+    console.error("Error loading ROM:", err);
+  }
 });
 
 // ---- Start Button ----
