@@ -1,174 +1,30 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>NES Emulator</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NES Emulator - Modular MVP</title>
   <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background: #1e1e1e;
-      color: #f0f0f0;
-      font-family: Arial, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
-    header {
-      background: #2c2c2c;
-      width: 100%;
-      padding: 10px;
-      text-align: center;
-      border-bottom: 2px solid #444;
-    }
-    canvas {
-      margin-top: 20px;
-      border: 2px solid #444;
-      image-rendering: pixelated;
-      display: block;
-    }
-    #controls {
-      margin-top: 20px;
-    }
-    button {
-      background: #3a3a3a;
-      color: #f0f0f0;
-      border: 1px solid #555;
-      padding: 8px 16px;
-      margin: 4px;
-      cursor: pointer;
-      border-radius: 4px;
-      transition: background 0.2s;
-    }
-    button:hover {
-      background: #555;
-    }
-    iframe {
-      margin-top: 20px;
-      width: 600px;
-      height: 400px;
-      border: 2px solid #444;
-      border-radius: 6px;
-      background: #fff;
-    }
+    body{background:#0b0f14;color:#e8f0ff;font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;text-align:center;padding:12px}
+    canvas{image-rendering: pixelated; image-rendering: crisp-edges; background:#000; margin:12px; width:768px; height:720px; border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.5)}
+    .controls{display:flex;gap:8px;justify-content:center;align-items:center}
+    input, button{padding:8px;border-radius:8px;background:#121926;color:var(--fg);border:1px solid rgba(255,255,255,.06)}
   </style>
 </head>
 <body>
-  <header>
-    <h1>NES Emulator</h1>
-  </header>
+  <h1>NES Emulator — Modular MVP</h1>
+  <p>Drop an iNES (.nes) ROM or use the built-in smoke-test ROM.</p>
 
-  <!-- Video output -->
-  <canvas id="screen" width="256" height="240"></canvas>
-
-  <!-- Controls -->
-  <div id="controls">
-    <input type="file" id="romLoader" accept=".nes">
-    <button id="startBtn" disabled>Start</button>
-    <button id="pauseBtn">Pause</button>
+  <div class="controls">
+    <input id="romFile" type="file" accept=".nes,application/octet-stream"/>
+    <button id="btnUseBuilt">Use built-in test ROM</button>
+    <button id="btnRun" disabled>Run</button>
+    <button id="btnPause" disabled>Pause</button>
+    <button id="btnReset" disabled>Reset</button>
   </div>
 
-  <!-- Input Settings iframe -->
-  <iframe src="inputSettings.html"></iframe>
+  <canvas id="screen" width="256" height="240"></canvas>
 
-  <!-- Emulator scripts -->
-  <script type="module">
-    import CPU from './cpu.js';
-    import Memory from './memory.js';
-    import PPU from './ppu.js';
-    import APU from './apu.js';
-    import { Input } from './input.js';
-
-    const canvas = document.getElementById('screen');
-    const ctx = canvas.getContext('2d');
-    const romLoader = document.getElementById('romLoader');
-    const startBtn = document.getElementById('startBtn');
-    const pauseBtn = document.getElementById('pauseBtn');
-
-    // Emulator components
-    let cpu, memory, ppu, apu, input;
-    let romData = null;
-    let running = false;
-    let animationId = 0;
-
-    // ---- Draw test pattern immediately ----
-    function drawTestPattern() {
-      const imageData = ctx.createImageData(256, 240);
-      for (let y = 0; y < 240; y++) {
-        for (let x = 0; x < 256; x++) {
-          const idx = (y * 256 + x) * 4;
-          imageData.data[idx] = x % 256;          // R
-          imageData.data[idx + 1] = y % 256;      // G
-          imageData.data[idx + 2] = (x + y) % 256;// B
-          imageData.data[idx + 3] = 255;          // A
-        }
-      }
-      ctx.putImageData(imageData, 0, 0);
-    }
-
-    drawTestPattern();
-
-    // ---- ROM Loader ----
-    romLoader.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      const arrayBuffer = await file.arrayBuffer();
-      romData = new Uint8Array(arrayBuffer);
-      console.log("Loaded ROM:", file.name, romData.length, "bytes");
-
-      // Enable Start button after loading
-      startBtn.disabled = false;
-    });
-
-    // ---- Initialize Emulator ----
-    function initEmulator() {
-      memory = new Memory();
-      cpu = new CPU(memory);
-      ppu = new PPU(memory, ctx);
-      apu = new APU(cpu, memory);
-      input = new Input();
-
-      cpu.apu = apu;
-
-      // TODO: parse iNES header, map PRG/CHR into memory
-    }
-
-    // ---- Main Loop ----
-    function mainLoop() {
-      if (!running) return;
-
-      const CYCLES_PER_FRAME = 29780;
-      for (let i = 0; i < CYCLES_PER_FRAME; i++) {
-        cpu.step();
-        apu.step();
-        ppu.step();
-        if (apu.getIRQ()) cpu.triggerIRQ();
-      }
-
-      // Draw frame
-      ppu.renderFrame();
-
-      animationId = requestAnimationFrame(mainLoop);
-    }
-
-    // ---- Start Button ----
-    startBtn.addEventListener('click', () => {
-      if (!romData) {
-        alert("Please load a ROM first.");
-        return;
-      }
-      initEmulator();
-      running = true;
-      requestAnimationFrame(mainLoop);
-    });
-
-    // ---- Pause Button ----
-    pauseBtn.addEventListener('click', () => {
-      running = false;
-      if (animationId) cancelAnimationFrame(animationId);
-      animationId = 0;
-    });
-  </script>
+  <script type="module" src="./nes.js"></script>
 </body>
 </html>
