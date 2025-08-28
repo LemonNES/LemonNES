@@ -357,11 +357,6 @@ class PPU {
     this.mapper = null;
     this.mirror = 'horizontal';
 
-    // Video output
-    this.canvas = null;
-    this.ctx = null;
-    this.output = null;
-
     // PPU memory
     this.vram = new Uint8Array(0x800);   // 2KB internal nametable RAM
     this.palette = new Uint8Array(32);   // palette RAM indexes
