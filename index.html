@@ -91,6 +91,38 @@ function runFrame() {
   animationId = requestAnimationFrame(runFrame);
 }
 </script>
+<script>
+let nes = null;
+let animationId = 0;
+
+document.getElementById("startBtn").addEventListener("click", () => {
+  if (!nes) {
+    alert("Please load a ROM first!");
+    return;
+  }
+  runFrame();
+});
+
+document.getElementById("pauseBtn").addEventListener("click", () => {
+  if (animationId) cancelAnimationFrame(animationId);
+  animationId = 0;
+});
+
+// ---- Load ROM ----
+document.getElementById("romLoader").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const buffer = await file.arrayBuffer();
+  
+  // create NES instance
+  nes = new NES();              // assuming NES is a global class
+  nes.ppu = new PPU();          // instantiate your PPU from ppu.js
+  nes.loadROM(new Uint8Array(buffer));
+
+  console.log("ROM loaded:", file.name);
+});
+</script>
 
 
 <script>
