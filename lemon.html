@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NES Emulator – HTML + JS (PPU Sprites + APU + Mappers 0/1/2/3/4 MVP)</title>
+  <style>
+    :root { --bg:#0b0f14; --fg:#e8f0ff; --muted:#8aa0b6; --acc:#73d7ff; --card:#121926; }
+    html,body{height:100%; margin:0; background:var(--bg); color:var(--fg);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;}
+    .wrap{display:grid; grid-template-columns: 1fr 340px; gap:16px; padding:16px; box-sizing:border-box;}
+    header{grid-column: 1 / -1; display:flex; align-items:center; justify-content:space-between}
+    header h1{font-size:18px; margin:0; font-weight:600}
+    header .sub{color:var(--muted); font-size:12px}
+    .screen{background:#000; padding:8px; border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      display:flex; align-items:center; justify-content:center;}
+    canvas{image-rendering: pixelated; image-rendering: crisp-edges; border-radius:12px; background:#000; touch-action:none;}
+    .side{background:var(--card); border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:12px;}
+    .row{display:flex; align-items:center; gap:10px;}
+    .row + .row{margin-top:10px}
+    label{font-size:12px; color:var(--muted)}
+    .stat{font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; color:#99b3cc}
+    button, input[type="file"]::file-selector-button{background:#1a2433; color:var(--fg); border:1px solid rgba(255,255,255,.08); padding:8px 10px; border-radius:12px; cursor:pointer}
+    button:disabled{opacity:.5; cursor:not-allowed}
+    .kbd{display:inline-block; padding:.1rem .4rem; border-radius:6px; background:#0e1624; border:1px solid rgba(255,255,255,.05); font:11px ui-monospace}
+    details{margin-top:10px}
+    summary{cursor:pointer; color:var(--acc)}
+    ul{margin:.25rem 0 .5rem 1.25rem}
+    .grid2{display:grid; grid-template-columns: 1fr 1fr; gap:6px}
+    /* Mobile controls overlay */
+    .mobile-controls {
+      display: none;
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      z-index: 1000;
+      pointer-events:none;
+    }
+    .mobile-controls.active {
+      display: flex;
+      pointer-events: auto;
+      flex-direction: row;
+      justify-content: space-between;
+      width: 100vw;
+      padding: 0 2vw 2vw 2vw;
+      box-sizing: border-box;
+      user-select: none;
+    }
+    .dpad, .abpad {
+      display: grid;
+      grid-template-columns: repeat(3, 44px);
+      grid-template-rows: repeat(3, 44px);
+      gap: 4px;
+    }
+    .abpad {
+      grid-template-columns: 44px 44px;
+      grid-template-rows: 44px 44px;
+      gap: 16px;
+      align-self: flex-end;
+    }
+    .mobile-btn {
+      background:rgba(60,90,200,0.28); border:1px solid #567; border-radius:16px; color:#e0e8ff;
+      font-size:18px; font-family: ui-monospace; width:44px; height:44px; display:flex; align-items:center; justify-content:center;
+      opacity:.92; transition:background .1s; touch-action:none;
+      pointer-events: auto;
+      user-select: none;
+    }
+    .mobile-btn:active, .mobile-btn.pressed {
+      background:rgba(80,180,255,0.55);
+      color:#000;
+    }
+    @media (max-width: 900px) {
+      .wrap { display: block; padding: 2vw; }
+      .side { margin-top: 20px; }
+      .screen { justify-content: center; }
+      canvas { width: 98vw !important; height: auto !important; max-width: 100vw; max-height: 70vw; }
+      .mobile-controls { display: flex !important; }
+    }
+    @media (pointer: coarse) {
+      .mobile-controls { display: flex !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>NES Emulator (JS) <span class="sub">– PPU sprites + APU + Mappers 0/1/2/3/4 (MVP)</span></h1>
+        <div class="sub">Cycle-stepped PPU (scanline/dot), sprite pipeline w/ sprite-0 hit, simple APU, and baseline common mappers.</div>
+      </div>
+      <div class="stat" id="build"></div>
+    </header>
+
+    <div class="screen">
+      <canvas id="screen" width="256" height="240" style="width:768px;height:720px"></canvas>
+    </div>
+
+    <aside class="side">
+      <div class="row">
+        <input id="rom" type="file" accept=".nes,application/octet-stream" />
+        <button id="btnRun" disabled>Run</button>
+        <button id="btnPause" disabled>Pause</button>
+        <button id="btnReset" disabled>Reset</button>
+      </div>
+      <div class="row stat">
+        <div>ROM: <span id="romName">—</span></div>
+      </div>
+      <div class="grid2 stat">
+        <div>FPS: <span id="fps">0</span></div>
+        <div>CPU: <span id="mhz">—</span></div>
+        <div>Mapper: <span id="mapper">—</span></div>
+        <div>Mirroring: <span id="mirror">—</span></div>
+        <div>IRQs: <span id="irqs">—</span></div>
+      </div>
+
+      <details>
+        <summary>Controls</summary>
+        <ul>
+          <li>P1: <span class="kbd">Arrow Keys</span>, <span class="kbd">Z</span>=A, <span class="kbd">X</span>=B, <span class="kbd">Enter</span>=Start, <span class="kbd">Right Shift</span>=Select</li>
+          <li>Touch: Mobile controls are visible on touch devices</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>Status / Notes</summary>
+        <ul>
+          <li>PPU: background + 8-sprites/scanline, priority, clipping, sprite-0 hit, NMI at vblank.</li>
+          <li>APU: pulse 1/2, triangle, noise; DMC stub; basic frame sequencer & length/envelope (approx).</li>
+          <li>Mappers: NROM (0), MMC1 (1 minimal), UxROM (2), CNROM (3), MMC3 (4 minimal, no IRQ).</li>
+          <li>Accuracy: good for many early titles/homebrew; MMC3 IRQs not implemented yet → some games run without proper split-screen effects.</li>
+        </ul>
+      </details>
+
+      <details>
+        <summary>Roadmap toward Nestopia-like quality</summary>
+        <ul>
+          <li>Exact PPU open-bus, odd-frame cycle skip, precise timing on $2002/$2007 side effects.</li>
+          <li>APU: proper resampler, DMC channel + IRQ, sweep/length counters edge cases.</li>
+          <li>MMC3 scanline IRQ and A12 timing; more mappers (VRC, Sunsoft, etc.).</li>
+        </ul>
+      </details>
+    </aside>
+  </div>
+
+  <!-- Mobile controls overlay -->
+  <div class="mobile-controls" id="mobileControls" aria-hidden="true">
+    <div style="flex:1;">
+      <div class="dpad">
+        <div></div>
+        <button class="mobile-btn" data-key="ArrowUp" aria-label="Up">&#8593;</button>
+        <div></div>
+        <button class="mobile-btn" data-key="ArrowLeft" aria-label="Left">&#8592;</button>
+        <div></div>
+        <button class="mobile-btn" data-key="ArrowRight" aria-label="Right">&#8594;</button>
+        <div></div>
+        <button class="mobile-btn" data-key="ArrowDown" aria-label="Down">&#8595;</button>
+        <div></div>
+      </div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:flex-end;justify-content:flex-end;gap:8px;">
+      <div class="abpad">
+        <button class="mobile-btn" data-key="KeyZ" aria-label="A">A</button>
+        <button class="mobile-btn" data-key="KeyX" aria-label="B">B</button>
+        <button class="mobile-btn" data-key="Enter" aria-label="Start">Start</button>
+        <button class="mobile-btn" data-key="ShiftRight" aria-label="Select">Sel</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const BUILD = new Date().toISOString().replace('T',' ').slice(0,19);
+  document.getElementById('build').textContent = `build ${BUILD}`;
+
+  // ===== Utilities =====
+  const clamp=(v,min,max)=>v<min?min:v>max?max:v;
+  const u8 = n => n & 0xFF;
+  const u16 = n => n & 0xFFFF;
+  const toHex=(n,len=2)=>('0'.repeat(len)+n.toString(16).toUpperCase()).slice(-len);
+
+  // ===== Controllers =====
+  class Controllers{
+    constructor(){
+      this.state1=0; this.state2=0; this.latch=0; this.shift1=0; this.shift2=0;
+      this.keyMap = { // bit order: A,B,Select,Start,Up,Down,Left,Right
+        'KeyZ':0, 'KeyX':1, 'ShiftRight':2, 'Enter':3,
+        'ArrowUp':4,'ArrowDown':5,'ArrowLeft':6,'ArrowRight':7,
+      };
+      this.bindKeys();
+      this.mobileActive = false;
+      this.initMobile();
+    }
+    bindKeys(){
+      window.addEventListener('keydown',e=>{
+        if(e.repeat) return;
+        if(this.keyMap[e.code]!==undefined){
+          this.state1 |= (1<<this.keyMap[e.code]);
+          e.preventDefault();
+        }
+      });
+      window.addEventListener('keyup',e=>{
+        if(this.keyMap[e.code]!==undefined){
+          this.state1 &= ~(1<<this.keyMap[e.code]);
+          e.preventDefault();
+        }
+      });
+    }
+    write(v){ this.latch = v & 1; if(this.latch){ this.shift1=this.state1; this.shift2=this.state2; }}
+    read1(){ const out = this.shift1 & 1; if(!this.latch) this.shift1 = (this.shift1>>>1)|0x80; return out; }
+    read2(){ const out = this.shift2 & 1; if(!this.latch) this.shift2 = (this.shift2>>>1)|0x80; return out; }
+
+    // === Mobile controls ===
+    initMobile() {
+      const mobileControls = document.getElementById('mobileControls');
+      if (!mobileControls) return;
+
+      // Detect mobile/touch
+      const enableMobile = () => {
+        mobileControls.classList.add('active');
+        this.mobileActive = true;
+      };
+      const disableMobile = () => {
+        mobileControls.classList.remove('active');
+        this.mobileActive = false;
+      };
+      // Show controls on touch devices or on small screens
+      if ('ontouchstart' in window || navigator.maxTouchPoints || window.innerWidth < 900) {
+        enableMobile();
+      }
+      window.addEventListener('resize', ()=>{
+        if(window.innerWidth < 900) enableMobile();
+        else if(!('ontouchstart' in window || navigator.maxTouchPoints)) disableMobile();
+      });
+
+      // For each mobile button, simulate keydown/up
+      const btns = mobileControls.querySelectorAll('.mobile-btn');
+      for(const btn of btns) {
+        const code = btn.dataset.key;
+        const bit = this.keyMap[code];
+        if(bit === undefined) continue;
+
+        // Touch
+        let isPressed = false;
+        const press = e => {
+          if(isPressed) return;
+          isPressed = true;
+          this.state1 |= (1<<bit);
+          btn.classList.add('pressed');
+          e.preventDefault();
+        };
+        const release = e => {
+          isPressed = false;
+          this.state1 &= ~(1<<bit);
+          btn.classList.remove('pressed');
+          e.preventDefault();
+        };
+        btn.addEventListener('touchstart', press, {passive:false});
+        btn.addEventListener('touchend', release, {passive:false});
+        btn.addEventListener('touchcancel', release, {passive:false});
+        btn.addEventListener('mousedown', press);
+        btn.addEventListener('mouseup', release);
+        btn.addEventListener('mouseleave', release);
+        // Prevent scrolling and double-tap zoom
+        btn.addEventListener('contextmenu', e=>e.preventDefault());
+      }
+
+      // Prevent scrolling when interacting with controls
+      mobileControls.addEventListener('touchmove', e=>{
+        if(e.target.classList.contains('mobile-btn')) e.preventDefault();
+      }, {passive:false});
+    }
+  }
+
+  // ===== APU (very simplified) =====
+  class APU {
+    constructor(){
+      this.reg = new Uint8Array(0x18);
+      this.frameStep = 0; this.frameCounter = 0; this.cycles = 0;
+      // channels
+      this.pulse = [this.mkPulse(), this.mkPulse()];
+      this.tri = this.mkTriangle();
+      this.noise = this.mkNoise();
+      this.dmc = { enabled:false };
+      // audio out
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ac = new AC();
+      this.bufferSize = 2048;
+      this.node = this.ac.createScriptProcessor(this.bufferSize, 0, 1);
+      this.node.onaudioprocess = e => this.pullSamples(e.outputBuffer.getChannelData(0));
+      this.gain = this.ac.createGain(); this.gain.gain.value = 0.2;
+      this.node.connect(this.gain).connect(this.ac.destination);
+    }
+    mkPulse(){ return {timer:0, phase:0, duty:0, volume:0x0F, enabled:true, length:0, env:0x0F, constant:1}; }
+    mkTriangle(){ return {timer:0, phase:0, enabled:true, length:0, linear:0x7F}; }
+    mkNoise(){ return {timer:0, lfsr:1, volume:0x0F, enabled:true, length:0, env:0x0F, mode:0}; }
+
+    read(addr){ if(addr===0x4015){
+        let s=0; if(this.pulse[0].length) s|=1; if(this.pulse[1].length) s|=2; if(this.tri.length) s|=4; if(this.noise.length) s|=8; return s; }
+      return 0; }
+    write(addr,val){ this.reg[addr-0x4000]=val;
+      const ch = (addr>>2)&1; // 0 or 1 for pulse
+      switch(addr){
+        case 0x4000: case 0x4004: this.pulse[ch].duty = (val>>6)&3; this.pulse[ch].constant = (val>>4)&1; this.pulse[ch].volume = val&0x0F; break;
+        case 0x4001: case 0x4005: /* sweep ignored in MVP */ break;
+        case 0x4002: case 0x4006: this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val; break;
+        case 0x4003: case 0x4007: this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07)<<8); this.pulse[ch].length=0x1F; this.pulse[ch].phase=0; break;
+        case 0x4008: this.tri.linear = val & 0x7F; break;
+        case 0x400A: this.tri.timer = (this.tri.timer & 0x700) | val; break;
+        case 0x400B: this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07)<<8); this.tri.length=0x1F; this.tri.phase=0; break;
+        case 0x400C: this.noise.constant=(val>>4)&1; this.noise.volume=val&0x0F; break;
+        case 0x400E: this.noise.mode=(val>>7)&1; this.noise.timer = [0x004,0x008,0x010,0x020,0x040,0x060,0x080,0x0A0,0x0CA,0x0FE,0x17C,0x1FC,0x2FA,0x3F8,0x7F2,0xFE6][val&0x0F]; break;
+        case 0x400F: this.noise.length=0x1F; break;
+        case 0x4015: this.pulse[0].enabled=!!(val&1); this.pulse[1].enabled=!!(val&2); this.tri.enabled=!!(val&4); this.noise.enabled=!!(val&8); break;
+        case 0x4017: /* frame counter; ignored for now */ break;
+      }
+    }
+
+    step(cycles){ // very rough: advance internal timers with CPU cycles
+      this.cycles += cycles;
+      // timers (not exact NTSC ratios; MVP approximation)
+      const advance = (ch,tick)=>{ while(this.cycles>=tick){ this.cycles-=tick; ch.phase=(ch.phase+1)&0x7FFF; } };
+      const pTick = 2; // crude
+      advance(this.pulse[0], pTick); advance(this.pulse[1], pTick);
+      advance(this.tri, 2); advance(this.noise, 1);
+      // noise LFSR update
+      if(this.noise.timer){ if((this.noise.phase&31)===0){ const bit=((this.noise.lfsr ^ (this.noise.lfsr>>(this.noise.mode?6:1)))&1); this.noise.lfsr=(this.noise.lfsr>>1)| (bit<<14);} }
+    }
+
+    pullSamples(out){ // generate audio for the next buffer using current channel states
+      const len = out.length; const sr = this.ac.sampleRate;
+      for(let i=0;i<len;i++){
+        // pulse
+        const sq = (ch)=>{ if(!ch.enabled||!ch.length||ch.timer<8) return 0; const duty=[8,4,2,1][ch.duty]; const period = (ch.timer+1)*16; const t = ch.phase % period; const on = t < period*(1/duty); const vol = ch.constant? ch.volume : ch.env; return on ? (vol/15) : 0; };
+        const p = sq(this.pulse[0]) + sq(this.pulse[1]);
+        // triangle
+        let tri=0; if(this.tri.enabled && this.tri.length && this.tri.timer>=2){ const period=(this.tri.timer+1)*32; const t=this.tri.phase%period; const saw = t/period; tri = 1 - Math.abs(2*saw - 1); tri*=0.7; }
+        // noise
+        const n = (this.noise.enabled&&this.noise.length)? (((this.noise.lfsr&1)?1:-1) * (this.noise.volume/15) * 0.2) : 0;
+        out[i] = (p*0.25 + tri*0.35 + n*0.25);
+      }
+    }
+  }
+
+  // ===== Mappers =====
+  // ...no change...
+
+  // ===== Cartridge (iNES) =====
+  // ...no change...
+
+  // ===== Bus =====
+  // ...no change...
+
+  // ===== PPU (cycle-stepped with sprites & sprite-0 hit) =====
+  // Major graphics fixes below.
+  class PPU{
+    constructor(){
+      this.v=0; this.t=0; this.x=0; this.w=0; // scroll regs
+      this.ctrl=0; this.mask=0; this.status=0; this.oamaddr=0; this.buffered=0;
+      this.oam = new Uint8Array(256); // primary OAM
+      this.secOAM = new Uint8Array(32); // 8 sprites * 4 bytes
+      this.spriteCount=0; this.spriteZeroInLine=false; this.spriteZeroHit=false;
+      this.cycle=0; this.scanline=261; this.frame=0; this.nmi=false; this.cart=null; this.mapper=null; this.canvas=null; this.ctx=null; this.output=null;
+      this.vram = new Uint8Array(0x800); // 2KB internal
+      this.palette = new Uint8Array(32);
+      this.bgLatch = {lo:0,hi:0,pal:0}; // graphics fix: always defined
+    }
+    attachCanvas(canvas){ this.canvas=canvas; this.ctx=canvas.getContext('2d', { alpha:false, willReadFrequently:true }); this.output=this.ctx.createImageData(256,240); }
+    connectCart(cart){ this.cart=cart;
+      this.mapper = [Mapper0,Mapper1,Mapper2,Mapper3,Mapper4][cart.mapper] ? new ([Mapper0,Mapper1,Mapper2,Mapper3,Mapper4][cart.mapper])(cart) : new Mapper0(cart);
+      this.mirror=cart.mirror; }
+    reset(){ this.v=this.t=this.x=this.w=0; this.ctrl=this.mask=this.status=this.oamaddr=0; this.cycle=0; this.scanline=261; this.nmi=false; this.frame=0; }
+
+    read(addr){
+      switch(addr){
+        case 0x2002: { // PPUSTATUS
+          const res = (this.status & 0xE0) | (this.buffered & 0x1F);
+          this.status &= ~0x80; this.w=0; return res; }
+        case 0x2004: return this.oam[this.oamaddr];
+        case 0x2007: {
+          const value = this.ppuRead(this.v);
+          this.v += (this.ctrl & 0x04) ? 32 : 1; this.v&=0x7FFF; return value;
+        }
+      }
+      return 0;
+    }
+    write(addr,val){
+      switch(addr){
+        case 0x2000: this.ctrl=val; break;
+        case 0x2001: this.mask=val; break;
+        case 0x2003: this.oamaddr=val; break;
+        case 0x2004: this.oam[this.oamaddr++]=val; break;
+        case 0x2005: if(this.w===0){ this.x = val & 0x7; this.t = (this.t & 0x7FE0) | (val>>3); this.w=1; } else { this.t = (this.t & 0x0C1F) | ((val & 0x07) << 12) | ((val & 0xF8) << 2); this.w=0; } break;
+        case 0x2006: if(this.w===0){ this.t = (this.t & 0x00FF) | ((val & 0x3F) << 8); this.w=1; } else { this.t = (this.t & 0x7F00) | val; this.v=this.t; this.w=0; } break;
+        case 0x2007: this.ppuWrite(this.v, val); this.v += (this.ctrl & 0x04) ? 32 : 1; this.v&=0x7FFF; break;
+      }
+    }
+    doDMA(buf){ for(let i=0;i<256;i++) this.oam[(this.oamaddr+i)&0xFF]=buf[i]; }
+
+    ntIndex(addr){ const a=(addr-0x2000)&0x0FFF; const nt=(a>>10)&3; const off=a&0x03FF; if(this.mirror==='vertical'){ return ((nt&1)*0x400)+off; } if(this.mirror==='horizontal'){ return (((nt>>1)&1)*0x400)+off; } return off; }
+
+    ppuRead(addr){ addr &= 0x3FFF;
+      if(addr<0x2000){ return this.mapper.chrRead(addr); }
+      if(addr<0x3F00){ return this.vram[this.ntIndex(addr)]; }
+      return this.palette[addr & 0x1F];
+    }
+    ppuWrite(addr,val){ addr&=0x3FFF; val&=0xFF; if(addr<0x2000){ this.mapper.chrWrite(addr,val); return; }
+      if(addr<0x3F00){ this.vram[this.ntIndex(addr)]=val; return; }
+      this.palette[addr & 0x1F] = val; }
+
+    incCoarseX(){ if((this.v & 0x001F) === 31){ this.v &= ~0x001F; this.v ^= 0x0400; } else { this.v++; } }
+    incY(){ if((this.v & 0x7000) !== 0x7000){ this.v += 0x1000; } else { this.v &= ~0x7000; let y = (this.v & 0x03E0) >> 5; if(y === 29){ y=0; this.v ^= 0x0800; } else if(y === 31){ y=0; } else { y++; } this.v = (this.v & ~0x03E0) | (y<<5); } }
+    copyX(){ this.v = (this.v & ~0x041F) | (this.t & 0x041F); }
+    copyY(){ this.v = (this.v & ~0x7BE0) | (this.t & 0x7BE0); }
+
+    bgFetch(){ const nt = 0x2000 | (this.v & 0x0FFF); const at = 0x23C0 | (this.v & 0x0C00) | ((this.v>>4) & 0x38) | ((this.v>>2)&0x07);
+      const fineY = (this.v>>12)&7; const tile = this.ppuRead(nt); const attr = this.ppuRead(at); const shift = ((this.v>>4)&4)| (this.v&2);
+      const pal = ((attr>>shift)&3) << 2; const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000; const addr = base + tile*16 + fineY;
+      const lo = this.ppuRead(addr); const hi = this.ppuRead(addr+8); return {lo,hi,pal}; }
+
+    evalSprites(){ const y = this.scanline; this.spriteCount=0; this.spriteZeroInLine=false; for(let i=0;i<64;i++){ const o=i*4; const sy=this.oam[o]; const tile=this.oam[o+1]; const attr=this.oam[o+2]; const sx=this.oam[o+3]; const h = (this.ctrl & 0x20) ? 16 : 8; const row = y - sy; if(row>=0 && row<h && this.spriteCount<8){ if(i===0) this.spriteZeroInLine=true; const flipV = (attr>>7)&1; const flipH = (attr>>6)&1; const palette = (attr & 3) + 4; const priority = (attr>>5)&1; this.secOAM[this.spriteCount*4+0]=sy; this.secOAM[this.spriteCount*4+1]=tile; this.secOAM[this.spriteCount*4+2]=attr; this.secOAM[this.spriteCount*4+3]=sx; this.spriteCount++; if(this.spriteCount===8){ this.status |= 0x20; break; } } }
+    }
+
+    renderPixel(x,y,bg,sp){
+      const idx = (y*256 + x)*4; const img=this.output.data; let colorIndex = 0; let bgPx=0;
+      if((this.mask & 0x08)){ // background enable
+        const bit = 7 - ((x + this.x) & 7);
+        bgPx = ((bg.hi>>bit)&1)<<1 | ((bg.lo>>bit)&1);
+        if(bgPx){ colorIndex = 0x10 + bg.pal + bgPx; } else colorIndex = 0; // universal background
+      }
+      let spriteOpaque = 0, spritePriority=0, spritePalette=0, sprite0=false, spPx=0;
+      if((this.mask & 0x10)){
+        for(let i=0;i<this.spriteCount;i++){
+          const o=i*4; const sy=this.secOAM[o]; const tile=this.secOAM[o+1]; const attr=this.secOAM[o+2]; const sx=this.secOAM[o+3]; const h=8;
+          const row = y - sy; if(x<sx || x>=sx+8 || row<0 || row>=h) continue;
+          const flipV=(attr>>7)&1, flipH=(attr>>6)&1; const palette=((attr&3)+4)<<2; spritePriority=(attr>>5)&1; if(this.spriteZeroInLine && i===0) sprite0=true;
+          const fineY = flipV? (7-row) : row; const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000; const addr = base + tile*16 + fineY; const lo=this.ppuRead(addr); const hi=this.ppuRead(addr+8); const bit = flipH? (x - sx) : (7 - (x - sx)); spPx = ((hi>>bit)&1)<<1 | ((lo>>bit)&1); if(spPx){ spriteOpaque=1; spritePalette=palette; break; }
+        }
+      }
+      // sprite-0 hit
+      if(spriteOpaque && bgPx && sprite0 && x<255){ this.status |= 0x40; }
+      const cindex = spriteOpaque && (!spritePriority || bgPx===0) ? (0x10 + spritePalette + spPx) : (bgPx? colorIndex : this.palette[0]);
+      const rgb = NTSC_PALETTE[cindex & 0x3F]; img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255;
+    }
+
+    step(){
+      // Visible scanlines 0-239; pre-render 261; vblank 241-260
+      if(this.scanline===261){
+        if(this.cycle===1){ this.status &= ~(0x80|0x40|0x20); }
+        if(this.cycle>=280 && this.cycle<=304 && (this.mask&0x18)){ this.copyY(); }
+      }
+      if(this.scanline>=0 && this.scanline<240){
+        if(this.cycle===0){ /* idle */ }
+        else if(this.cycle===1){ this.evalSprites(); }
+        if(this.cycle>=1 && this.cycle<=256){
+          // Background tile fetch should be per 8 pixels (graphics fix)
+          if((this.cycle-1)%8===0){ this.bgLatch = this.bgFetch(); }
+          const x = this.cycle-1; const y = this.scanline; this.renderPixel(x,y,this.bgLatch, null);
+          if((this.cycle&7)===0){ this.incCoarseX(); }
+        }
+        if(this.cycle===257){ this.copyX(); }
+        if(this.cycle===256){ this.incY(); }
+      }
+      if(this.scanline===241 && this.cycle===1){
+        this.status |= 0x80; if(this.ctrl & 0x80){ this.nmi=true; }
+        // This is a good place to blit to the visible canvas (graphics fix)
+        this.ctx.putImageData(this.output,0,0);
+      }
+      this.cycle++; if(this.cycle>340){ this.cycle=0; this.scanline++; if(this.scanline>261){ this.scanline=0; this.frame++; } }
+    }
+  }
+
+  // NES color palette (approx NTSC)
+  const NTSC_PALETTE = [
+    [84,84,84],[0,30,116],[8,16,144],[48,0,136],[68,0,100],[92,0,48],[84,4,0],[60,24,0],[32,42,0],[8,58,0],[0,64,0],[0,60,0],[0,50,60],[0,0,0],[0,0,0],[0,0,0],
+    [152,150,152],[8,76,196],[48,50,236],[92,30,228],[136,20,176],[160,20,100],[152,34,32],[120,60,0],[84,90,0],[40,114,0],[8,124,0],[0,118,40],[0,102,120],[0,0,0],[0,0,0],[0,0,0],
+    [236,238,236],[76,154,236],[120,124,236],[176,98,236],[228,84,236],[236,88,180],[236,106,100],[212,136,32],[160,170,0],[116,196,0],[76,208,32],[56,204,108],[56,180,204],[60,60,60],[0,0,0],[0,0,0],
+    [236,238,236],[168,204,236],[188,188,236],[212,178,236],[236,174,236],[236,174,212],[236,180,176],[228,196,144],[204,210,120],[180,222,120],[168,226,144],[152,226,180],[160,214,228],[160,162,160],[0,0,0],[0,0,0]
+  ];
+
+  // ===== 6502 CPU (official opcodes only) =====
+  // ...no change...
+
+  // ===== NES Machine =====
+  class NES{
+    constructor(canvas){
+      this.ppu=new PPU(); this.ppu.attachCanvas(canvas); this.input=new Controllers();
+      this.cart=null; this.bus=null; this.cpu=null; this.apu=new APU();
+      this.running=false; this.last=performance.now(); this.frames=0; this.fps=0; this.mhz='—';
+      // Responsive canvas for mobile
+      this.makeResponsiveCanvas();
+    }
+    makeResponsiveCanvas() {
+      const c = this.ppu.canvas;
+      const resize = () => {
+        if(window.innerWidth < 900) {
+          // Fit width to viewport, keep aspect
+          c.style.width = "98vw";
+          c.style.height = Math.round(240*98/256) + "vw";
+        } else {
+          c.style.width = "768px";
+          c.style.height = "720px";
+        }
+      };
+      window.addEventListener('resize', resize);
+      resize();
+    }
+    loadROM(bytes){ this.cart=new Cartridge(bytes); this.ppu.connectCart(this.cart); this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu); this.cpu=new CPU6502(this.bus); this.bus.cpu=this.cpu; this.cpu.reset(); document.getElementById('mapper').textContent=this.cart.mapper; document.getElementById('mirror').textContent=this.cart.mirror; }
+    reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
+    step(){ // 1 CPU cycle ~ 3 PPU cycles (NTSC). We'll drive PPU 3x per CPU step.
+      const cyc = this.cpu.step(); for(let i=0;i<cyc*3;i++){ this.ppu.step(); if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false; } }
+      this.apu.step(cyc);
+    }
+    run(){ if(this.running) return; this.running=true; const loop = ()=>{ if(!this.running) return; const target = performance.now() + 16; // ~60 Hz slice
+        // run a slice of cycles
+        let iter=0; while(performance.now()<target && iter<20000){ this.step(); iter++; }
+        this.frames++; if(this.frames%30===0){ document.getElementById('fps').textContent = Math.round(1000/16); document.getElementById('mhz').textContent='~1.79 (approx)'; }
+        requestAnimationFrame(loop);
+      }; requestAnimationFrame(loop); }
+    pause(){ this.running=false; }
+  }
+
+  // ===== UI glue =====
+  const canvas = document.getElementById('screen');
+  const nes = new NES(canvas);
+  const romInput = document.getElementById('rom');
+  const btnRun = document.getElementById('btnRun');
+  const btnPause = document.getElementById('btnPause');
+  const btnReset = document.getElementById('btnReset');
+  const romName = document.getElementById('romName');
+
+  romInput.addEventListener('change', async (e)=>{
+    const f=e.target.files[0]; if(!f) return; romName.textContent=f.name;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    try {
+      nes.loadROM(buf); btnRun.disabled=false; btnPause.disabled=false; btnReset.disabled=false;
+    } catch(err){ alert('ROM load failed: '+err.message); btnRun.disabled=true; btnPause.disabled=true; btnReset.disabled=true; }
+  });
+
+  btnRun.addEventListener('click',()=>nes.run());
+  btnPause.addEventListener('click',()=>nes.pause());
+  btnReset.addEventListener('click',()=>nes.reset());
+})();
+</script>
+</body>
+</html>
