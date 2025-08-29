@@ -341,13 +341,143 @@
   }
 
   // ===== Mappers =====
-  // ...no change...
-
+ class Mapper {
+    constructor(cart){ this.cart=cart; }
+    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
+    prgWrite(addr,val){}
+    chrRead(addr){ return this.cart.chr[addr]; }
+    chrWrite(addr,val){ if(this.cart.chrRAM) this.cart.chr[addr]=val; }
+    ppuA12Rising(){}
+    get mirroring(){ return this.cart.mirror; }
+  }
+  // NROM (0)
+  class Mapper0 extends Mapper{
+    prgRead(addr){ if(this.cart.prg.length===0x4000 && addr>=0xC000) return this.cart.prg[addr-0xC000]; return this.cart.prg[addr-0x8000]; }
+  }
+  // MMC1 (1) – minimal (no SRAM/battery, IRQs). Shift register control.
+  class Mapper1 extends Mapper{
+    constructor(c){ super(c); this.shift=0x10; this.ctrl=0x0C; this.prgBank=0; this.chrBank0=0; this.chrBank1=0; }
+    writeReg(addr,val){ if(val&0x80){ this.shift=0x10; this.ctrl|=0x0C; return; }
+      const complete = (this.shift & 1); this.shift = (this.shift>>1) | ((val&1)<<4);
+      if(complete){ const reg = (addr>>13)&3; const data = this.shift & 0x1F; this.shift=0x10;
+        if(reg===0){ this.ctrl=data; this.cart.mirror=['horizontal','vertical','single0','single1'][data&3]||'horizontal'; }
+        else if(reg===1){ this.chrBank0=data; }
+        else if(reg===2){ this.chrBank1=data; }
+        else if(reg===3){ this.prgBank=data & 0x0F; }
+      }
+    }
+    prgRead(addr){ const mode=(this.ctrl>>2)&3; const bank16=(b)=>b*0x4000;
+      if(mode===0||mode===1){ // 32K
+        const base=(this.prgBank&0x0E)*0x4000; return this.cart.prg[base + (addr-0x8000)];
+      } else if(mode===2){ // fix first
+        if(addr<0xC000) return this.cart.prg[(addr-0x8000)];
+        const base=bank16(this.prgBank); return this.cart.prg[base + (addr-0xC000)];
+      } else { // fix last
+        const base=bank16(this.prgBank);
+        if(addr<0xC000) return this.cart.prg[base + (addr-0x8000)];
+        return this.cart.prg[this.cart.prg.length-0x4000 + (addr-0xC000)];
+      }
+    }
+    prgWrite(addr,val){ this.writeReg(addr,val); }
+    chrRead(addr){ const mode = (this.ctrl>>4)&1; if(mode===0){ const base=(this.chrBank0&0x1E)*0x1000; return this.cart.chr[base + addr]; } else { const base = (addr<0x1000? this.chrBank0: this.chrBank1)*0x1000; return this.cart.chr[base + (addr&0x0FFF)]; }
+    }
+    chrWrite(addr,val){ if(this.cart.chrRAM){ const mode=(this.ctrl>>4)&1; if(mode===0){ const base=(this.chrBank0&0x1E)*0x1000; this.cart.chr[base + addr]=val; } else { const base = (addr<0x1000? this.chrBank0: this.chrBank1)*0x1000; this.cart.chr[base + (addr&0x0FFF)]=val; } }
+    }
+  }
+  // UxROM (2)
+  class Mapper2 extends Mapper{
+    constructor(c){ super(c); this.bank=0; }
+    prgRead(addr){ if(addr<0xC000){ const base=this.bank*0x4000; return this.cart.prg[base + (addr-0x8000)]; } return this.cart.prg[this.cart.prg.length-0x4000 + (addr-0xC000)]; }
+    prgWrite(addr,val){ this.bank = val & 0x0F; }
+  }
+  // CNROM (3)
+  class Mapper3 extends Mapper{
+    constructor(c){ super(c); this.chrBank=0; }
+    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
+    prgWrite(addr,val){ this.chrBank = val & 0x03; }
+    chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
+  }
+  // MMC3 (4) – minimal (no IRQ; bank switching only, A12 tracking stub)
+  class Mapper4 extends Mapper{
+    constructor(c){ super(c); this.bankSelect=0; this.banks=new Uint8Array(8); this.mirror= c.mirror; this.prgMode=0; this.chrMode=0; }
+    prgRead(addr){ const prgSize=this.cart.prg.length; const bank16=(i)=> (i% (prgSize/0x2000)) * 0x2000; const last=prgSize-0x2000;
+      const bankAt=(slot)=>{ const i = this.banks[slot]; return bank16(i); };
+      if(addr<0xA000){ const a = this.prgMode? bankAt(6) : 0; return this.cart.prg[a + (addr-0x8000)]; }
+      if(addr<0xC000){ const a = bankAt(7); return this.cart.prg[a + (addr-0xA000)]; }
+      if(addr<0xE000){ const a = this.prgMode? 0 : bankAt(6); return this.cart.prg[a + (addr-0xC000)]; }
+      return this.cart.prg[last + (addr-0xE000)];
+    }
+    prgWrite(addr,val){ if((addr&1)===0){ // even
+        if((addr&0x6000)===0x0000){ this.bankSelect=val; this.chrMode=(val>>7)&1; this.prgMode=(val>>6)&1; }
+        else if((addr&0x6000)===0x2000){ /* mirroring */ this.cart.mirror = (val&1)?'horizontal':'vertical'; }
+      } else {
+        if((addr&0x6000)===0x0000){ const reg= this.bankSelect&7; this.banks[reg]=val; }
+      }
+    }
+    chrRead(addr){ // 8x1KB banks combined into 2KB/1KB depending on mode
+      const chrAt=(i)=> (this.banks[i]*0x400) & (this.cart.chr.length-1);
+      if(this.chrMode){ // high first
+        if(addr<0x0800) return this.cart.chr[chrAt(2) + (addr)];
+        if(addr<0x1000) return this.cart.chr[chrAt(3) + (addr-0x0800)];
+        if(addr<0x1400) return this.cart.chr[chrAt(4) + (addr-0x1000)];
+        if(addr<0x1800) return this.cart.chr[chrAt(5) + (addr-0x1400)];
+        if(addr<0x1C00) return this.cart.chr[chrAt(0) + (addr-0x1800)];
+        return this.cart.chr[chrAt(1) + (addr-0x1C00)];
+      } else {
+        if(addr<0x0800) return this.cart.chr[chrAt(0) + (addr)];
+        if(addr<0x1000) return this.cart.chr[chrAt(1) + (addr-0x0800)];
+        if(addr<0x1400) return this.cart.chr[chrAt(2) + (addr-0x1000)];
+        if(addr<0x1800) return this.cart.chr[chrAt(3) + (addr-0x1400)];
+        if(addr<0x1C00) return this.cart.chr[chrAt(4) + (addr-0x1800)];
+        return this.cart.chr[chrAt(5) + (addr-0x1C00)];
+      }
+    }
+  }
   // ===== Cartridge (iNES) =====
-  // ...no change...
+  
+  class Cartridge{
+    constructor(bytes){ this.bytes=bytes; this.parseINES(); }
+    parseINES(){
+      const b=this.bytes; if(b[0]!==0x4E||b[1]!==0x45||b[2]!==0x53||b[3]!==0x1A) throw new Error('Not an iNES file');
+      const prgBanks=b[4], chrBanks=b[5]; const flag6=b[6], flag7=b[7];
+      const ines2 = (flag7 & 0x0C) === 0x08; if(ines2) throw new Error('iNES2 not supported in MVP');
+      this.mapper = ((flag7 & 0xF0) | (flag6>>4));
+      const fourScreen = !!(flag6 & 0x08);
+      this.mirror = (flag6 & 1) ? 'vertical' : 'horizontal'; if(fourScreen) this.mirror='four';
+      this.hasTrainer = !!(flag6 & 0x04);
+      let off=16; if(this.hasTrainer) off+=512;
+      const prgSize = prgBanks * 16384; const chrSize = chrBanks * 8192;
+      this.prg = b.slice(off, off+prgSize); off+=prgSize;
+      this.chr = chrSize ? b.slice(off, off+chrSize) : new Uint8Array(8192); // CHR-RAM if 0
+      this.chrRAM = chrSize===0;
+      this.sram = new Uint8Array(0x2000);
+    }
+  }
 
   // ===== Bus =====
-  // ...no change...
+  class Bus {
+    constructor(cpu, ppu, cart, input, apu){ this.cpu=cpu; this.ppu=ppu; this.cart=cart; this.input=input; this.apu=apu; this.ram=new Uint8Array(0x800); }
+    cpuRead(addr){ addr&=0xFFFF; if(addr<0x2000){return this.ram[addr&0x7FF];}
+      if(addr<0x4000){return this.ppu.read(0x2000 + (addr&7));}
+      if(addr===0x4015){return this.apu.read(addr);} // APU status
+      if(addr===0x4016){return this.input.read1();}
+      if(addr===0x4017){return this.input.read2();}
+      if(addr>=0x8000){return this.ppu.mapper.prgRead(addr);} 
+      if(addr>=0x6000){return this.ppu.cart.sram[addr-0x6000];}
+      return 0; }
+    cpuWrite(addr,val){ addr&=0xFFFF; val&=0xFF; if(addr<0x2000){this.ram[addr&0x7FF]=val; return;}
+      if(addr<0x4000){this.ppu.write(0x2000 + (addr&7), val); return;}
+      if(addr===0x4014){ // OAMDMA
+        const page = val<<8; const buf = new Uint8Array(256); for(let i=0;i<256;i++) buf[i]=this.cpuRead(page+i);
+        this.ppu.doDMA(buf); this.cpu.stall += 513 + (this.cpu.cycles%2===1?1:0); return;}
+      if(addr===0x4016){this.input.write(val); return;}
+      if(addr>=0x4000 && addr<=0x4017){ this.apu.write(addr,val); return; }
+      if(addr>=0x8000){this.ppu.mapper.prgWrite(addr,val); return;}
+      if(addr>=0x6000){this.ppu.cart.sram[addr-0x6000]=val; return;}
+    }
+  }
+
+ 
 
   // ===== PPU (cycle-stepped with sprites & sprite-0 hit) =====
   // Major graphics fixes below.
