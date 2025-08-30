@@ -366,7 +366,143 @@
   }
 
   // [Mappers, Cartridge, Bus, ... unchanged for brevity, see previous code.]
+class Mapper {
+    constructor(cart){ this.cart=cart; }
+    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
+    prgWrite(addr,val){}
+    chrRead(addr){ return this.cart.chr[addr]; }
+    chrWrite(addr,val){ if(this.cart.chrRAM) this.cart.chr[addr]=val; }
+    ppuA12Rising(){}
+    get mirroring(){ return this.cart.mirror; }
+  }
+  // NROM (0)
+  class Mapper0 extends Mapper{
+    prgRead(addr){ if(this.cart.prg.length===0x4000 && addr>=0xC000) return this.cart.prg[addr-0xC000]; return this.cart.prg[addr-0x8000]; }
+  }
+  // MMC1 (1) – minimal (no SRAM/battery, IRQs). Shift register control.
+  class Mapper1 extends Mapper{
+    constructor(c){ super(c); this.shift=0x10; this.ctrl=0x0C; this.prgBank=0; this.chrBank0=0; this.chrBank1=0; }
+    writeReg(addr,val){ if(val&0x80){ this.shift=0x10; this.ctrl|=0x0C; return; }
+      const complete = (this.shift & 1); this.shift = (this.shift>>1) | ((val&1)<<4);
+      if(complete){ const reg = (addr>>13)&3; const data = this.shift & 0x1F; this.shift=0x10;
+        if(reg===0){ this.ctrl=data; this.cart.mirror=['horizontal','vertical','single0','single1'][data&3]||'horizontal'; }
+        else if(reg===1){ this.chrBank0=data; }
+        else if(reg===2){ this.chrBank1=data; }
+        else if(reg===3){ this.prgBank=data & 0x0F; }
+      }
+    }
+    prgRead(addr){ const mode=(this.ctrl>>2)&3; const bank16=(b)=>b*0x4000;
+      if(mode===0||mode===1){ // 32K
+        const base=(this.prgBank&0x0E)*0x4000; return this.cart.prg[base + (addr-0x8000)];
+      } else if(mode===2){ // fix first
+        if(addr<0xC000) return this.cart.prg[(addr-0x8000)];
+        const base=bank16(this.prgBank); return this.cart.prg[base + (addr-0xC000)];
+      } else { // fix last
+        const base=bank16(this.prgBank);
+        if(addr<0xC000) return this.cart.prg[base + (addr-0x8000)];
+        return this.cart.prg[this.cart.prg.length-0x4000 + (addr-0xC000)];
+      }
+    }
+    prgWrite(addr,val){ this.writeReg(addr,val); }
+    chrRead(addr){ const mode = (this.ctrl>>4)&1; if(mode===0){ const base=(this.chrBank0&0x1E)*0x1000; return this.cart.chr[base + addr]; } else { const base = (addr<0x1000? this.chrBank0: this.chrBank1)*0x1000; return this.cart.chr[base + (addr&0x0FFF)]; }
+    }
+    chrWrite(addr,val){ if(this.cart.chrRAM){ const mode=(this.ctrl>>4)&1; if(mode===0){ const base=(this.chrBank0&0x1E)*0x1000; this.cart.chr[base + addr]=val; } else { const base = (addr<0x1000? this.chrBank0: this.chrBank1)*0x1000; this.cart.chr[base + (addr&0x0FFF)]=val; } }
+    }
+  }
+  // UxROM (2)
+  class Mapper2 extends Mapper{
+    constructor(c){ super(c); this.bank=0; }
+    prgRead(addr){ if(addr<0xC000){ const base=this.bank*0x4000; return this.cart.prg[base + (addr-0x8000)]; } return this.cart.prg[this.cart.prg.length-0x4000 + (addr-0xC000)]; }
+    prgWrite(addr,val){ this.bank = val & 0x0F; }
+  }
+  // CNROM (3)
+  class Mapper3 extends Mapper{
+    constructor(c){ super(c); this.chrBank=0; }
+    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
+    prgWrite(addr,val){ this.chrBank = val & 0x03; }
+    chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
+  }
+  // MMC3 (4) – minimal (no IRQ; bank switching only, A12 tracking stub)
+  class Mapper4 extends Mapper{
+    constructor(c){ super(c); this.bankSelect=0; this.banks=new Uint8Array(8); this.mirror= c.mirror; this.prgMode=0; this.chrMode=0; }
+    prgRead(addr){ const prgSize=this.cart.prg.length; const bank16=(i)=> (i% (prgSize/0x2000)) * 0x2000; const last=prgSize-0x2000;
+      const bankAt=(slot)=>{ const i = this.banks[slot]; return bank16(i); };
+      if(addr<0xA000){ const a = this.prgMode? bankAt(6) : 0; return this.cart.prg[a + (addr-0x8000)]; }
+      if(addr<0xC000){ const a = bankAt(7); return this.cart.prg[a + (addr-0xA000)]; }
+      if(addr<0xE000){ const a = this.prgMode? 0 : bankAt(6); return this.cart.prg[a + (addr-0xC000)]; }
+      return this.cart.prg[last + (addr-0xE000)];
+    }
+    prgWrite(addr,val){ if((addr&1)===0){ // even
+        if((addr&0x6000)===0x0000){ this.bankSelect=val; this.chrMode=(val>>7)&1; this.prgMode=(val>>6)&1; }
+        else if((addr&0x6000)===0x2000){ /* mirroring */ this.cart.mirror = (val&1)?'horizontal':'vertical'; }
+      } else {
+        if((addr&0x6000)===0x0000){ const reg= this.bankSelect&7; this.banks[reg]=val; }
+      }
+    }
+    chrRead(addr){ // 8x1KB banks combined into 2KB/1KB depending on mode
+      const chrAt=(i)=> (this.banks[i]*0x400) & (this.cart.chr.length-1);
+      if(this.chrMode){ // high first
+        if(addr<0x0800) return this.cart.chr[chrAt(2) + (addr)];
+        if(addr<0x1000) return this.cart.chr[chrAt(3) + (addr-0x0800)];
+        if(addr<0x1400) return this.cart.chr[chrAt(4) + (addr-0x1000)];
+        if(addr<0x1800) return this.cart.chr[chrAt(5) + (addr-0x1400)];
+        if(addr<0x1C00) return this.cart.chr[chrAt(0) + (addr-0x1800)];
+        return this.cart.chr[chrAt(1) + (addr-0x1C00)];
+      } else {
+        if(addr<0x0800) return this.cart.chr[chrAt(0) + (addr)];
+        if(addr<0x1000) return this.cart.chr[chrAt(1) + (addr-0x0800)];
+        if(addr<0x1400) return this.cart.chr[chrAt(2) + (addr-0x1000)];
+        if(addr<0x1800) return this.cart.chr[chrAt(3) + (addr-0x1400)];
+        if(addr<0x1C00) return this.cart.chr[chrAt(4) + (addr-0x1800)];
+        return this.cart.chr[chrAt(5) + (addr-0x1C00)];
+      }
+    }
+  }
 
+   // ===== Cartridge (iNES) =====
+  
+  class Cartridge{
+    constructor(bytes){ this.bytes=bytes; this.parseINES(); }
+    parseINES(){
+      const b=this.bytes; if(b[0]!==0x4E||b[1]!==0x45||b[2]!==0x53||b[3]!==0x1A) throw new Error('Not an iNES file');
+      const prgBanks=b[4], chrBanks=b[5]; const flag6=b[6], flag7=b[7];
+      const ines2 = (flag7 & 0x0C) === 0x08; if(ines2) throw new Error('iNES2 not supported in MVP');
+      this.mapper = ((flag7 & 0xF0) | (flag6>>4));
+      const fourScreen = !!(flag6 & 0x08);
+      this.mirror = (flag6 & 1) ? 'vertical' : 'horizontal'; if(fourScreen) this.mirror='four';
+      this.hasTrainer = !!(flag6 & 0x04);
+      let off=16; if(this.hasTrainer) off+=512;
+      const prgSize = prgBanks * 16384; const chrSize = chrBanks * 8192;
+      this.prg = b.slice(off, off+prgSize); off+=prgSize;
+      this.chr = chrSize ? b.slice(off, off+chrSize) : new Uint8Array(8192); // CHR-RAM if 0
+      this.chrRAM = chrSize===0;
+      this.sram = new Uint8Array(0x2000);
+    }
+  }
+
+  // ===== Bus =====
+  class Bus {
+    constructor(cpu, ppu, cart, input, apu){ this.cpu=cpu; this.ppu=ppu; this.cart=cart; this.input=input; this.apu=apu; this.ram=new Uint8Array(0x800); }
+    cpuRead(addr){ addr&=0xFFFF; if(addr<0x2000){return this.ram[addr&0x7FF];}
+      if(addr<0x4000){return this.ppu.read(0x2000 + (addr&7));}
+      if(addr===0x4015){return this.apu.read(addr);} // APU status
+      if(addr===0x4016){return this.input.read1();}
+      if(addr===0x4017){return this.input.read2();}
+      if(addr>=0x8000){return this.ppu.mapper.prgRead(addr);} 
+      if(addr>=0x6000){return this.ppu.cart.sram[addr-0x6000];}
+      return 0; }
+    cpuWrite(addr,val){ addr&=0xFFFF; val&=0xFF; if(addr<0x2000){this.ram[addr&0x7FF]=val; return;}
+      if(addr<0x4000){this.ppu.write(0x2000 + (addr&7), val); return;}
+      if(addr===0x4014){ // OAMDMA
+        const page = val<<8; const buf = new Uint8Array(256); for(let i=0;i<256;i++) buf[i]=this.cpuRead(page+i);
+        this.ppu.doDMA(buf); this.cpu.stall += 513 + (this.cpu.cycles%2===1?1:0); return;}
+      if(addr===0x4016){this.input.write(val); return;}
+      if(addr>=0x4000 && addr<=0x4017){ this.apu.write(addr,val); return; }
+      if(addr>=0x8000){this.ppu.mapper.prgWrite(addr,val); return;}
+      if(addr>=0x6000){this.ppu.cart.sram[addr-0x6000]=val; return;}
+    }
+  }
+ 
   // ... Mapper, Cartridge, Bus, and CPU6502 code omitted for brevity ...
   // ... PPU changes for smooth scrolling and true color below ...
 
@@ -444,7 +580,140 @@
       this.cycle++; if(this.cycle>340){ this.cycle=0; this.scanline++; if(this.scanline>261){ this.scanline=0; this.frame++; } }
     }
   }
+  
+  class CPU6502{
+    constructor(bus){ this.bus=bus; this.a=0; this.x=0; this.y=0; this.sp=0xFD; this.p=0x24; this.pc=0; this.cycles=0; this.stall=0; this.resetVector=0x8000; }
+    getC(){return this.p&1;} setC(v){this.p = (this.p & ~1) | (v&1);} getZ(){return (this.p>>1)&1;} setZ(v){this.p = (this.p & ~2) | ((v?1:0)<<1);} getI(){return (this.p>>2)&1;} setI(v){this.p = (this.p & ~4) | ((v?1:0)<<2);} getD(){return (this.p>>3)&1;} setD(v){this.p = (this.p & ~8) | ((v?1:0)<<3);} getB(){return (this.p>>4)&1;} setB(v){this.p = (this.p & ~16)|((v?1:0)<<4);} getU(){return (this.p>>5)&1;} setU(v){this.p = (this.p & ~32)|((v?1:0)<<5);} getV(){return (this.p>>6)&1;} setV(v){this.p = (this.p & ~64)|((v?1:0)<<6);} getN(){return (this.p>>7)&1;} setN(v){this.p = (this.p & ~128)|((v?1:0)<<7);} 
+    read(a){return this.bus.cpuRead(a);} write(a,v){this.bus.cpuWrite(a,v);} 
+    push(v){this.write(0x100+this.sp, v); this.sp=u8(this.sp-1);} pop(){this.sp=u8(this.sp+1); return this.read(0x100+this.sp);} 
+    reset(){ this.a=0; this.x=0; this.y=0; this.sp=0xFD; this.p=0x24; const lo=this.read(0xFFFC), hi=this.read(0xFFFD); this.pc=lo | (hi<<8); this.cycles=7; this.stall=0; }
+    nmi(){ this.push((this.pc>>8)&0xFF); this.push(this.pc&0xFF); this.setB(0); this.setU(1); this.setI(1); this.push(this.p); const lo=this.read(0xFFFA), hi=this.read(0xFFFB); this.pc=lo|(hi<<8); this.cycles+=7; }
+    irq(){ if(this.getI()) return; this.push((this.pc>>8)&0xFF); this.push(this.pc&0xFF); this.setB(0); this.setU(1); this.setI(1); this.push(this.p); const lo=this.read(0xFFFE), hi=this.read(0xFFFF); this.pc=lo|(hi<<8); this.cycles+=7; }
 
+    step(){ if(this.stall>0){ this.stall--; this.cycles++; return 1; }
+      const op=this.read(this.pc++); const e = OPCODES[op]; if(!e){ return 2; }
+      const {mode, ins, cyc} = e; this.addrMode=mode; this.pageCross=0; const addr = this.fetchAddr(mode);
+      const cyclesBefore=this.cycles; this.execute(ins, addr); let c = cyc + this.pageCross; this.cycles += c; return this.cycles - cyclesBefore; }
+
+    fetchAddr(mode){
+      const zp=()=>this.read(this.pc++);
+      const zpX=()=>u8(zp()+this.x);
+      const zpY=()=>u8(zp()+this.y);
+      const imm=()=>this.pc++;
+      const abs=()=>{const lo=this.read(this.pc++), hi=this.read(this.pc++); return lo|(hi<<8)};
+      const absX=()=>{const a=abs(); const res=u16(a+this.x); if((a^res)&0xFF00) this.pageCross=1; return res;}
+      const absY=()=>{const a=abs(); const res=u16(a+this.y); if((a^res)&0xFF00) this.pageCross=1; return res;}
+      const indX=()=>{const t = u8(this.read(this.pc++) + this.x); const lo=this.read(t), hi=this.read(u8(t+1)); return lo|(hi<<8)};
+      const indY=()=>{const t = this.read(this.pc++); const lo=this.read(t), hi=this.read(u8(t+1)); const a=lo|(hi<<8); const res=u16(a+this.y); if((a^res)&0xFF00) this.pageCross=1; return res;}
+      switch(mode){
+        case 'IMP': return null; case 'IMM': return imm(); case 'ZP0': return zp(); case 'ZPX': return zpX(); case 'ZPY': return zpY();
+        case 'ABS': return abs(); case 'ABX': return absX(); case 'ABY': return absY(); case 'IZX': return indX(); case 'IZY': return indY();
+        case 'IND': {const ptr=abs(); const lo=this.read(ptr); const hi=this.read((ptr&0xFF00)|((ptr+1)&0xFF)); return lo|(hi<<8);} 
+        case 'REL': {const off=u8(this.read(this.pc++)); return off<0x80? this.pc+off : this.pc+off-0x100;}
+      }
+    }
+    setZN(v){ this.setZ((v&0xFF)===0); this.setN(v&0x80); }
+
+    execute(ins, addr){
+      const rd = a=>this.read(a); const wr=(a,v)=>this.write(a,u8(v));
+      const ADC=v=>{const t=this.a+v+this.getC(); this.setC(t>0xFF); this.setV((~(this.a^v) & (this.a^t) & 0x80)); this.a=u8(t); this.setZN(this.a);}
+      const SBC=v=>{ADC(v^0xFF)};
+      const CMP=(r,v)=>{const t=r-v; this.setC(r>=v); this.setZN(u8(t));}
+      const BIT=v=>{this.setZ((this.a & v)===0); this.setV(v&0x40); this.setN(v&0x80);}
+      const branch=cond=>{ if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }}
+
+      switch(ins){
+        case 'BRK': this.pc++; this.push((this.pc>>8)&0xFF); this.push(this.pc&0xFF); this.setB(1); this.push(this.p); this.setI(1); this.pc = this.read(0xFFFE) | (this.read(0xFFFF)<<8); break;
+        case 'NOP': break;
+        case 'LDA': this.a=rd(addr); this.setZN(this.a); break;
+        case 'LDX': this.x=rd(addr); this.setZN(this.x); break;
+        case 'LDY': this.y=rd(addr); this.setZN(this.y); break;
+        case 'STA': wr(addr,this.a); break;
+        case 'STX': wr(addr,this.x); break;
+        case 'STY': wr(addr,this.y); break;
+        case 'TAX': this.x=this.a; this.setZN(this.x); break;
+        case 'TAY': this.y=this.a; this.setZN(this.y); break;
+        case 'TXA': this.a=this.x; this.setZN(this.a); break;
+        case 'TYA': this.a=this.y; this.setZN(this.a); break;
+        case 'TSX': this.x=this.sp; this.setZN(this.x); break;
+        case 'TXS': this.sp=this.x; break;
+        case 'PHA': this.push(this.a); break;
+        case 'PHP': this.push(this.p|0x10); break;
+        case 'PLA': this.a=this.pop(); this.setZN(this.a); break;
+        case 'PLP': this.p=(this.pop()&0xEF)|0x20; break;
+        case 'AND': this.a &= rd(addr); this.setZN(this.a); break;
+        case 'ORA': this.a |= rd(addr); this.setZN(this.a); break;
+        case 'EOR': this.a ^= rd(addr); this.setZN(this.a); break;
+        case 'ADC': ADC(rd(addr)); break;
+        case 'SBC': SBC(rd(addr)); break;
+        case 'CMP': CMP(this.a, rd(addr)); break;
+        case 'CPX': CMP(this.x, rd(addr)); break;
+        case 'CPY': CMP(this.y, rd(addr)); break;
+        case 'INC': {const v=u8(rd(addr)+1); wr(addr,v); this.setZN(v); } break;
+        case 'INX': this.x=u8(this.x+1); this.setZN(this.x); break;
+        case 'INY': this.y=u8(this.y+1); this.setZN(this.y); break;
+        case 'DEC': {const v=u8(rd(addr)-1); wr(addr,v); this.setZN(v); } break;
+        case 'DEX': this.x=u8(this.x-1); this.setZN(this.x); break;
+        case 'DEY': this.y=u8(this.y-1); this.setZN(this.y); break;
+        case 'ASL': if(this.addrMode==='IMP'){ this.setC(this.a>>7); this.a=u8(this.a<<1); this.setZN(this.a);} else { const v=rd(addr); this.setC(v>>7); const r=u8(v<<1); wr(addr,r); this.setZN(r);} break;
+        case 'LSR': if(this.addrMode==='IMP'){ this.setC(this.a&1); this.a=u8(this.a>>>1); this.setZN(this.a);} else { const v=rd(addr); this.setC(v&1); const r=u8(v>>>1); wr(addr,r); this.setZN(r);} break;
+        case 'ROL': if(this.addrMode==='IMP'){ const c=this.getC(); this.setC(this.a>>7); this.a=u8((this.a<<1)|c); this.setZN(this.a);} else { const v=rd(addr); const c=this.getC(); this.setC(v>>7); const r=u8((v<<1)|c); wr(addr,r); this.setZN(r);} break;
+        case 'ROR': if(this.addrMode==='IMP'){ const c=this.getC(); this.setC(this.a&1); this.a=u8((this.a>>>1)|(c<<7)); this.setZN(this.a);} else { const v=rd(addr); const c=this.getC(); this.setC(v&1); const r=u8((v>>>1)|(c<<7)); wr(addr,r); this.setZN(r);} break;
+        case 'BIT': BIT(rd(addr)); break;
+        case 'JMP': this.pc = addr; break;
+        case 'JSR': {const t=u16(this.pc-1); this.push((t>>8)&0xFF); this.push(t&0xFF); this.pc=addr;} break;
+        case 'RTS': {const lo=this.pop(), hi=this.pop(); this.pc = ((hi<<8)|lo) + 1;} break;
+        case 'RTI': {this.p=(this.pop()&0xEF)|0x20; const lo=this.pop(), hi=this.pop(); this.pc=(hi<<8)|lo;} break;
+        case 'BCC': {const cond=!this.getC(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BCS': {const cond=this.getC(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BEQ': {const cond=this.getZ(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BMI': {const cond=this.getN(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BNE': {const cond=!this.getZ(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BPL': {const cond=!this.getN(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BVC': {const cond=!this.getV(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'BVS': {const cond=this.getV(); if(cond){ this.cycles++; if((this.pc&0xFF00)!=(addr&0xFF00)) this.cycles++; this.pc=addr; }} break;
+        case 'CLC': this.setC(0); break; case 'SEC': this.setC(1); break; case 'CLI': this.setI(0); break; case 'SEI': this.setI(1); break; case 'CLV': this.setV(0); break; case 'CLD': this.setD(0); break; case 'SED': this.setD(1); break;
+      }
+    }
+  }
+
+  // Opcode table (official opcodes only)
+  const O = (mode, ins, cyc) => ({mode, ins, cyc});
+  const OPCODES = new Array(256);
+  const fill = (list)=>list.forEach(([op,mode,ins,cyc])=>OPCODES[op]=O(mode,ins,cyc));
+  fill([
+    [0x00,'IMP','BRK',7],[0xEA,'IMP','NOP',2],
+    [0xA9,'IMM','LDA',2],[0xA5,'ZP0','LDA',3],[0xB5,'ZPX','LDA',4],[0xAD,'ABS','LDA',4],[0xBD,'ABX','LDA',4],[0xB9,'ABY','LDA',4],[0xA1,'IZX','LDA',6],[0xB1,'IZY','LDA',5],
+    [0xA2,'IMM','LDX',2],[0xA6,'ZP0','LDX',3],[0xB6,'ZPY','LDX',4],[0xAE,'ABS','LDX',4],[0xBE,'ABY','LDX',4],
+    [0xA0,'IMM','LDY',2],[0xA4,'ZP0','LDY',3],[0xB4,'ZPX','LDY',4],[0xAC,'ABS','LDY',4],[0xBC,'ABX','LDY',4],
+    [0x85,'ZP0','STA',3],[0x95,'ZPX','STA',4],[0x8D,'ABS','STA',4],[0x9D,'ABX','STA',5],[0x99,'ABY','STA',5],[0x81,'IZX','STA',6],[0x91,'IZY','STA',6],
+    [0x86,'ZP0','STX',3],[0x96,'ZPY','STX',4],[0x8E,'ABS','STX',4],
+    [0x84,'ZP0','STY',3],[0x94,'ZPX','STY',4],[0x8C,'ABS','STY',4],
+    [0xAA,'IMP','TAX',2],[0xA8,'IMP','TAY',2],[0x8A,'IMP','TXA',2],[0x98,'IMP','TYA',2],
+    [0xBA,'IMP','TSX',2],[0x9A,'IMP','TXS',2],
+    [0x48,'IMP','PHA',3],[0x08,'IMP','PHP',3],[0x68,'IMP','PLA',4],[0x28,'IMP','PLP',4],
+    [0x29,'IMM','AND',2],[0x25,'ZP0','AND',3],[0x35,'ZPX','AND',4],[0x2D,'ABS','AND',4],[0x3D,'ABX','AND',4],[0x39,'ABY','AND',4],[0x21,'IZX','AND',6],[0x31,'IZY','AND',5],
+    [0x09,'IMM','ORA',2],[0x05,'ZP0','ORA',3],[0x15,'ZPX','ORA',4],[0x0D,'ABS','ORA',4],[0x1D,'ABX','ORA',4],[0x19,'ABY','ORA',4],[0x01,'IZX','ORA',6],[0x11,'IZY','ORA',5],
+    [0x49,'IMM','EOR',2],[0x45,'ZP0','EOR',3],[0x55,'ZPX','EOR',4],[0x4D,'ABS','EOR',4],[0x5D,'ABX','EOR',4],[0x59,'ABY','EOR',4],[0x41,'IZX','EOR',6],[0x51,'IZY','EOR',5],
+    [0x69,'IMM','ADC',2],[0x65,'ZP0','ADC',3],[0x75,'ZPX','ADC',4],[0x6D,'ABS','ADC',4],[0x7D,'ABX','ADC',4],[0x79,'ABY','ADC',4],[0x61,'IZX','ADC',6],[0x71,'IZY','ADC',5],
+    [0xE9,'IMM','SBC',2],[0xE5,'ZP0','SBC',3],[0xF5,'ZPX','SBC',4],[0xED,'ABS','SBC',4],[0xFD,'ABX','SBC',4],[0xF9,'ABY','SBC',4],[0xE1,'IZX','SBC',6],[0xF1,'IZY','SBC',5],
+    [0xC9,'IMM','CMP',2],[0xC5,'ZP0','CMP',3],[0xD5,'ZPX','CMP',4],[0xCD,'ABS','CMP',4],[0xDD,'ABX','CMP',4],[0xD9,'ABY','CMP',4],[0xC1,'IZX','CMP',6],[0xD1,'IZY','CMP',5],
+    [0xE0,'IMM','CPX',2],[0xE4,'ZP0','CPX',3],[0xEC,'ABS','CPX',4],
+    [0xC0,'IMM','CPY',2],[0xC4,'ZP0','CPY',3],[0xCC,'ABS','CPY',4],
+    [0xE6,'ZP0','INC',5],[0xF6,'ZPX','INC',6],[0xEE,'ABS','INC',6],[0xFE,'ABX','INC',7],
+    [0xC6,'ZP0','DEC',5],[0xD6,'ZPX','DEC',6],[0xCE,'ABS','DEC',6],[0xDE,'ABX','DEC',7],
+    [0xE8,'IMP','INX',2],[0xC8,'IMP','INY',2],[0xCA,'IMP','DEX',2],[0x88,'IMP','DEY',2],
+    [0x0A,'IMP','ASL',2],[0x06,'ZP0','ASL',5],[0x16,'ZPX','ASL',6],[0x0E,'ABS','ASL',6],[0x1E,'ABX','ASL',7],
+    [0x4A,'IMP','LSR',2],[0x46,'ZP0','LSR',5],[0x56,'ZPX','LSR',6],[0x4E,'ABS','LSR',6],[0x5E,'ABX','LSR',7],
+    [0x2A,'IMP','ROL',2],[0x26,'ZP0','ROL',5],[0x36,'ZPX','ROL',6],[0x2E,'ABS','ROL',6],[0x3E,'ABX','ROL',7],
+    [0x6A,'IMP','ROR',2],[0x66,'ZP0','ROR',5],[0x76,'ZPX','ROR',6],[0x6E,'ABS','ROR',6],[0x7E,'ABX','ROR',7],
+    [0x24,'ZP0','BIT',3],[0x2C,'ABS','BIT',4],
+    [0x4C,'ABS','JMP',3],[0x6C,'IND','JMP',5],
+    [0x20,'ABS','JSR',6],[0x60,'IMP','RTS',6],[0x40,'IMP','RTI',6],
+    [0x90,'REL','BCC',2],[0xB0,'REL','BCS',2],[0xF0,'REL','BEQ',2],[0x30,'REL','BMI',2],[0xD0,'REL','BNE',2],[0x10,'REL','BPL',2],[0x50,'REL','BVC',2],[0x70,'REL','BVS',2],
+    [0x18,'IMP','CLC',2],[0x38,'IMP','SEC',2],[0x58,'IMP','CLI',2],[0x78,'IMP','SEI',2],[0xB8,'IMP','CLV',2],[0xD8,'IMP','CLD',2],[0xF8,'IMP','SED',2],
+  ]);
+  
   // ===== NES Machine with Accurate Frame Timing (NTSC 60.0988Hz) =====
   class NES{
     constructor(canvas){
