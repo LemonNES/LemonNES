@@ -10,3 +10,15 @@ built with help from ChatGPT
 • Newer NES Titles Don't Boot
 
 • Palette Discolorations
+
+# Tested Games 
+
+• Super Mario Bros
+
+• Balloon Fight
+
+• Exitebike 
+
+• Bubble Bobble
+
+• Donkey Kong
