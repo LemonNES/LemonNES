@@ -285,7 +285,7 @@
     }
   }
   // ===== Improved APU =====
-  class Envelope {
+  class APU {
     constructor() {
       this.loop = false;
       this.constant = false;
@@ -1153,7 +1153,8 @@
       this.apu.step(cyc);
     }
     run(){
-      if(this.running) return;
+      if(this.running) return;  
+      this.apu.ensureAudioContext();
       this.running=true;
       this._lastFrameTime = performance.now();
       this._pendingFrames = 0;
