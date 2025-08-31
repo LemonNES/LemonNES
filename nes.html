@@ -822,53 +822,38 @@
       this.apu.step(cyc);
     }
     run(){
-    if(this.running) return;
-    this.running=true;
-    this._lastFrameTime = performance.now();
-    this._pendingFrames = 0;
-    const animate = (now) => {
-      if (!this.running) return;
-      let framesToRun = 0;
-      // Frameskip logic
-      let dt = now - this._lastFrameTime;
-      if (dt > 1000) dt = 0;
-      this._lastFrameTime = now;
-      this._pendingFrames += dt / this._frameInterval;
-      framesToRun = Math.floor(this._pendingFrames);
-      this._pendingFrames -= framesToRun;
-      if (framesToRun > 5) framesToRun = 5; // Cap catch-up
-      // Run frames
-      for (let f = 0; f < framesToRun; ++f) {
-        // NES-accurate: 1 frame = 29,970 CPU cycles (NTSC)
-        let cpuCycles = 0;
-        while (cpuCycles < this._cpuCyclesPerFrame) {
-          cpuCycles += this.cpu.step();
-          for (let i = 0; i < 3; i++) {
-            this.ppu.step();
-            if (this.ppu.nmi) {
-              this.cpu.nmi();
-              this.ppu.nmi = false;
-            }
-          }
-          this.apu.step(1);
-        }
-        this._frameCount++;
+  if(this.running) return;
+  this.running=true;
+  const FRAME_INTERVAL = 1000/59.94; // 16.639 ms
+  const runFrame = () => {
+    if (!this.running) return;
+    const start = performance.now();
+    let cpuCycles = 0;
+    while(cpuCycles < 29970) {
+      cpuCycles += this.cpu.step();
+      for(let i=0; i<3; i++) {
+        this.ppu.step();
+        if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi = false; }
       }
-      // Update FPS counter every second
-      const nowTime = performance.now();
-      if (nowTime - this._lastFpsUpdate >= 1000) {
-        document.getElementById('fps').textContent = this._frameCount;
-        document.getElementById('mhz').textContent = "1.79 (NTSC)";
-        this._frameCount = 0;
-        this._lastFpsUpdate = nowTime;
-      }
-      requestAnimationFrame(animate);
-    };
-    requestAnimationFrame(animate);
-  }
-  
-    pause(){ this.running=false; }
-  }
+      this.apu.step(1);
+    }
+    this._frameCount++;
+    // FPS counter
+    const now = performance.now();
+    if (now - this._lastFpsUpdate >= 1000) {
+      document.getElementById('fps').textContent = this._frameCount;
+      document.getElementById('mhz').textContent = "1.79 (NTSC)";
+      this._frameCount = 0;
+      this._lastFpsUpdate = now;
+    }
+    // Wait for the next frame
+    const elapsed = performance.now() - start;
+    setTimeout(runFrame, Math.max(0, FRAME_INTERVAL - elapsed));
+  };
+  this._lastFpsUpdate = performance.now();
+  this._frameCount = 0;
+  runFrame();
+}
 
   // ===== UI glue =====
   const canvas = document.getElementById('screen');
