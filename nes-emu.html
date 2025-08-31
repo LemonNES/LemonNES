@@ -1352,8 +1352,33 @@ class NES{
   pause(){ this.running=false; }
 }
 
-  // ...UI glue and other code unchanged...
+ 
 
+  // ===== UI glue =====
+  const canvas = document.getElementById('screen');
+  const nes = new NES(canvas);
+  const romInput = document.getElementById('rom');
+  const btnRun = document.getElementById('btnRun');
+  const btnPause = document.getElementById('btnPause');
+  const btnReset = document.getElementById('btnReset');
+  const romName = document.getElementById('romName');
+
+  romInput.addEventListener('change', async (e)=>{
+    const f=e.target.files[0]; if(!f) return; romName.textContent=f.name;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    try {
+      nes.loadROM(buf); btnRun.disabled=false; btnPause.disabled=false; btnReset.disabled=false;
+    } catch(err){ alert('ROM load failed: '+err.message); btnRun.disabled=true; btnPause.disabled=true; btnReset.disabled=true; }
+  });
+
+  btnRun.addEventListener('click',()=>nes.run());
+  btnPause.addEventListener('click',()=>nes.pause());
+  btnReset.addEventListener('click',()=>nes.reset());
+
+  // Prevent scrolling/touchmove on body and document
+  window.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
+  window.addEventListener('scroll', function(){ window.scrollTo(0,0); }, {passive:false});
+  document.body.addEventListener('wheel', function(e){ e.preventDefault(); }, {passive:false});
 })();
 </script>
 </body>
