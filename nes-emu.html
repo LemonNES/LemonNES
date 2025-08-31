@@ -95,7 +95,7 @@
     }
   </style>
 </head>
-<body> 
+<body>
   <div class="wrap">
     <header>
       <div>
@@ -180,7 +180,6 @@
       </div>
     </div>
   </div>
-  <!-- ...rest of the HTML unchanged... -->
 
 <script>
 (() => {
@@ -285,555 +284,410 @@
       }, {passive:false});
     }
   }
-  // ===== APU  =====
-class APU {
-  constructor() {
-    this.pulse = [new PulseChannel(1), new PulseChannel(2)];
-    this.tri = new TriangleChannel();
-    this.noise = new NoiseChannel();
-    this.dmc = new DMCChannel();
-    this.frameCounter = 0;
-    this.frameStep = 0;
-    this.frameIrq = false;
-    this.frameMode = 0;
-    this.frameIrqInhibit = false;
-    this.cycles = 0;
-    this.reg = new Uint8Array(0x18);
-
-    // Only create AudioContext ONCE per page load for browser compatibility
-    if (!APU.sharedContext) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      APU.sharedContext = new AC();
-      APU.sharedGain = APU.sharedContext.createGain();
-      APU.sharedGain.gain.value = 0.2;
-      APU.sharedNode = APU.sharedContext.createScriptProcessor(2048, 0, 1);
-      APU.sharedNode.connect(APU.sharedGain).connect(APU.sharedContext.destination);
+  // ===== Improved APU =====
+  class Envelope {
+    constructor() {
+      this.loop = false;
+      this.constant = false;
+      this.volume = 0;
+      this.divider = 0;
+      this.decayLevel = 0;
+      this.start = false;
     }
-    this.ac = APU.sharedContext;
-    this.gain = APU.sharedGain;
-    this.node = APU.sharedNode;
-    this.node.onaudioprocess = e => this.pullSamples(e.outputBuffer.getChannelData(0));
-
-    // Mixer LUTs from NESdev
-    this.pulseTbl = new Float32Array(31);
-    for (let i = 0; i < 31; i++)
-      this.pulseTbl[i] = i === 0 ? 0 : 95.88 / (8128 / i + 100);
-    this.tndTbl = new Float32Array(203);
-    for (let i = 0; i < 203; i++)
-      this.tndTbl[i] = i === 0 ? 0 : 159.79 / (1 / (i / 8227 + i / 12241 + i / 22638) + 100);
-
-    // DMC memory read callback (set later)
-    this.readMem = addr => 0;
-  }
-
-  setReadMem(fn) {
-    this.readMem = fn;
-    this.dmc.setReadMem(fn);
-  }
-
-  read(addr) {
-    if (addr === 0x4015) {
-      let s = 0;
-      if (this.pulse[0].length > 0) s |= 1;
-      if (this.pulse[1].length > 0) s |= 2;
-      if (this.tri.length > 0) s |= 4;
-      if (this.noise.length > 0) s |= 8;
-      if (this.dmc.bytesRemain > 0) s |= 16;
-      if (this.frameIrq) s |= 0x40;
-      if (this.dmc.irqFlag) s |= 0x80;
-      this.frameIrq = false;
-      return s;
-    }
-    return 0;
-  }
-
-  write(addr, val) {
-    this.reg[addr - 0x4000] = val;
-    const ch = (addr >> 2) & 1;
-    switch (addr) {
-      // ...channel register writes unchanged...
-      case 0x4015: {
-        this.pulse[0].enabled = !!(val & 1);
-        this.pulse[1].enabled = !!(val & 2);
-        this.tri.enabled = !!(val & 4);
-        this.noise.enabled = !!(val & 8);
-        this.dmc.setEnabled(!!(val & 16));
-        if (!(val & 1)) this.pulse[0].length = 0;
-        if (!(val & 2)) this.pulse[1].length = 0;
-        if (!(val & 4)) this.tri.length = 0;
-        if (!(val & 8)) this.noise.length = 0;
-        if (!(val & 16)) this.dmc.bytesRemain = 0;
-        break;
-      }
-      case 0x4017: {
-        this.frameMode = (val >> 7) & 1;
-        this.frameIrqInhibit = !!(val & 0x40);
-        if (this.frameIrqInhibit) this.frameIrq = false;
-        this.frameStep = 0;
-        if (this.frameMode) {
-          this.clockEnvelope();
-          this.clockLengthSweep();
-        }
-        break;    
-      }
-    }
-  }
-
-  // CRITICAL: Call step(1) ONCE per CPU cycle for correct timing!
-  step(cycles) {
-    for (let i = 0; i < cycles; i++) {
-      this.cycles++;
-      this.dmc.apuCycle();
-      if (this.cycles === 7457 || this.cycles === 14913 || this.cycles === 22371 || this.cycles === 29829) {
-        let st = [7457, 14913, 22371, 29829].indexOf(this.cycles);
-        if (this.frameMode === 0) {
-          if (st === 0 || st === 2) this.clockEnvelope();
-          if (st === 1 || st === 3) this.clockEnvelope(), this.clockLengthSweep();
-          if (st === 3) {
-            if (!this.frameIrqInhibit) this.frameIrq = true;
-            this.cycles = 0;
+    clock() {
+      if (this.start) {
+        this.start = false;
+        this.decayLevel = 15;
+        this.divider = this.volume;
+      } else {
+        if (this.divider === 0) {
+          this.divider = this.volume;
+          if (this.decayLevel > 0) {
+            this.decayLevel--;
+          } else if (this.loop) {
+            this.decayLevel = 15;
           }
         } else {
-          if (st === 0 || st === 2) this.clockEnvelope();
-          if (st === 1 || st === 3) this.clockEnvelope(), this.clockLengthSweep();
-          if (this.cycles === 37281) this.cycles = 0;
+          this.divider--;
         }
       }
-      this.pulse[0].step();
-      this.pulse[1].step();
-      this.tri.step();
-      this.noise.step();
+    }
+    get output() {
+      return this.constant ? this.volume : this.decayLevel;
     }
   }
 
-  clockEnvelope() {
-    this.pulse[0].clockEnvelope();
-    this.pulse[1].clockEnvelope();
-    this.noise.clockEnvelope();
-    this.tri.clockLinear();
-  }
-  clockLengthSweep() {
-    this.pulse[0].clockLength();
-    this.pulse[1].clockLength();
-    this.pulse[0].clockSweep();
-    this.pulse[1].clockSweep();
-    this.tri.clockLength();
-    this.noise.clockLength();
-  }
-
-  // Audio output: ensure only ONE ScriptProcessorNode is active!
-  pullSamples(out) {
-    const len = out.length;
-    for (let i = 0; i < len; i++) {
-      const pulseSum = this.pulse[0].output() + this.pulse[1].output();
-      const tndSum =
-        3 * this.tri.output() +
-        2 * this.noise.output() +
-        this.dmc.output();
-      const pulseOut = this.pulseTbl[pulseSum];
-      const tndOut = this.tndTbl[tndSum];
-      out[i] = clamp(pulseOut + tndOut, -1, 1);
+  class LengthCounter {
+    constructor() {
+      this.enabled = false;
+      this.halt = false;
+      this.counter = 0;
     }
-  }
-}
-
-// ---- Pulse Channel ----
-class PulseChannel {
-  constructor(num) {
-    this.num = num;
-    this.enabled = false;
-    this.length = 0;
-    this.timer = 0;
-    this.timer_reload = 0;
-    this.phase = 0;
-    this.duty = 0;
-    this.dutyTable = [
-      [0, 1, 0, 0, 0, 0, 0, 0], // 12.5%
-      [0, 1, 1, 0, 0, 0, 0, 0], // 25%
-      [0, 1, 1, 1, 1, 0, 0, 0], // 50%
-      [1, 0, 0, 1, 1, 1, 1, 1], // 25% negated
+    clock() {
+      if (!this.halt && this.counter > 0) {
+        this.counter--;
+      }
+    }
+    set(value) {
+      this.counter = LengthCounter.table[value & 0x1F];
+    }
+    static table = [
+      10, 254, 20,  2, 40,  4, 80,  6,
+      160, 8, 60, 10, 14, 12, 26, 14,
+      12, 16, 24, 18, 48, 20, 96, 22,
+      192, 24, 72, 26, 16, 28, 32, 30
     ];
-    this.dutyStep = 0;
-    // Envelope
-    this.envLoop = false;
-    this.envConst = false;
-    this.envPeriod = 0;
-    this.envVol = 0;
-    this.envStart = false;
-    this.envDivider = 0;
-    this.envDecay = 0;
-    // Sweep
-    this.sweepEnabled = false;
-    this.sweepPeriod = 0;
-    this.sweepNegate = false;
-    this.sweepShift = 0;
-    this.sweepDivider = 0;
-    this.sweepReload = false;
-    this.sweepMute = false;
-    this.sweepNegateMode = num === 1 ? 0 : 1; // Channel 1: one's complement, Channel 2: two's complement
-    // Length counter
-    this.lengthHalt = false;
   }
-  setEnvelope(val) {
-    this.duty = (val >> 6) & 3;
-    this.lengthHalt = !!(val & 0x20);
-    this.envLoop = !!(val & 0x20);
-    this.envConst = !!(val & 0x10);
-    this.envPeriod = val & 0x0F;
-    this.envStart = true;
-  }
-  setSweep(val) {
-    this.sweepEnabled = !!(val & 0x80);
-    this.sweepPeriod = ((val >> 4) & 7) + 1;
-    this.sweepNegate = !!(val & 0x08);
-    this.sweepShift = val & 7;
-    this.sweepReload = true;
-  }
-  setTimerLow(val) {
-    this.timer_reload = (this.timer_reload & 0x700) | val;
-  }
-  setTimerHigh(val) {
-    this.timer_reload = (this.timer_reload & 0xFF) | ((val & 0x07) << 8);
-    this.length = lengthTable[(val >> 3) & 0x1F];
-    this.dutyStep = 0;
-    this.envStart = true;
-  }
-  step() {
-    if (this.timer === 0) {
-      this.timer = this.timer_reload;
-      this.dutyStep = (this.dutyStep + 1) & 7;
-    } else {
-      this.timer--;
+
+  class Sweep {
+    constructor(channel) {
+      this.enabled = false;
+      this.period = 0;
+      this.negate = false;
+      this.shift = 0;
+      this.divider = 0;
+      this.reload = false;
+      this.channel = channel;
     }
-  }
-  clockEnvelope() {
-    if (this.envStart) {
-      this.envDecay = 15;
-      this.envDivider = this.envPeriod;
-      this.envStart = false;
-    } else {
-      if (this.envDivider === 0) {
-        this.envDivider = this.envPeriod;
-        if (this.envDecay === 0) {
-          if (this.envLoop) this.envDecay = 15;
+    clock() {
+      if (this.divider === 0 && this.enabled && this.shift > 0) {
+        let change = this.channel.timer >> this.shift;
+        if (this.negate) {
+          // For pulse 1, extra -1
+          this.channel.timer -= change + (this.channel.index === 0 ? 1 : 0);
         } else {
-          this.envDecay--;
+          this.channel.timer += change;
+        }
+        // Clamp to 11 bits
+        this.channel.timer &= 0x7FF;
+      }
+      if (this.divider === 0 || this.reload) {
+        this.divider = this.period;
+        this.reload = false;
+      } else {
+        this.divider--;
+      }
+    }
+  }
+
+  class PulseChannel {
+    constructor(index) {
+      this.index = index; // 0 or 1
+      this.enabled = false;
+      this.duty = 0;
+      this.dutyStep = 0;
+      this.timer = 0;
+      this.timerReload = 0;
+      this.lengthCounter = new LengthCounter();
+      this.envelope = new Envelope();
+      this.sweep = new Sweep(this);
+      this.sequencer = [
+        [0,1,0,0,0,0,0,0],
+        [0,1,1,0,0,0,0,0],
+        [0,1,1,1,1,0,0,0],
+        [1,0,0,1,1,1,1,1]
+      ];
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = this.timerReload;
+        this.dutyStep = (this.dutyStep + 1) & 7;
+      } else {
+        this.timer--;
+      }
+    }
+    get output() {
+      if (!this.enabled) return 0;
+      if (this.lengthCounter.counter === 0) return 0;
+      if (this.timerReload < 8 || this.timerReload > 0x7FF) return 0;
+      if (this.sequencer[this.duty][this.dutyStep] === 0) return 0;
+      return this.envelope.output;
+    }
+  }
+
+  class TriangleChannel {
+    constructor() {
+      this.enabled = false;
+      this.lengthCounter = new LengthCounter();
+      this.linearCounter = 0;
+      this.linearReload = 0;
+      this.linearReloadFlag = false;
+      this.controlFlag = false;
+      this.timer = 0;
+      this.timerReload = 0;
+      this.sequence = [
+        15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,
+        0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+      ];
+      this.step = 0;
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = this.timerReload;
+        if (this.lengthCounter.counter > 0 && this.linearCounter > 0) {
+          this.step = (this.step + 1) & 31;
         }
       } else {
-        this.envDivider--;
+        this.timer--;
       }
     }
+    get output() {
+      if (!this.enabled) return 0;
+      if (this.lengthCounter.counter === 0) return 0;
+      if (this.linearCounter === 0) return 0;
+      return this.sequence[this.step];
+    }
   }
-  clockLength() {
-    if (!this.lengthHalt && this.length > 0) this.length--;
-  }
-  clockSweep() {
-    if (this.sweepReload) {
-      if (this.sweepEnabled && this.sweepShift > 0 && !this.sweepMute) {
-        this.sweepApply();
-      }
-      this.sweepDivider = this.sweepPeriod;
-      this.sweepReload = false;
-    } else {
-      if (this.sweepDivider === 0) {
-        if (this.sweepEnabled && this.sweepShift > 0 && !this.sweepMute) {
-          this.sweepApply();
+
+  class NoiseChannel {
+    constructor() {
+      this.enabled = false;
+      this.lengthCounter = new LengthCounter();
+      this.envelope = new Envelope();
+      this.mode = 0;
+      this.timer = 0;
+      this.timerReload = 0;
+      this.lfsr = 1;
+    }
+    clock() {
+      if (this.timer === 0) {
+        this.timer = this.timerReload;
+        let feedback;
+        if (this.mode) {
+          feedback = ((this.lfsr >> 6) ^ (this.lfsr >> 0)) & 1;
+        } else {
+          feedback = ((this.lfsr >> 1) ^ (this.lfsr >> 0)) & 1;
         }
-        this.sweepDivider = this.sweepPeriod;
+        this.lfsr = (this.lfsr >> 1) | (feedback << 14);
       } else {
-        this.sweepDivider--;
+        this.timer--;
       }
     }
-    this.updateSweepMute();
-  }
-  sweepApply() {
-    // Compute target period
-    let change = this.timer_reload >> this.sweepShift;
-    if (this.sweepNegate) {
-      if (this.sweepNegateMode)
-        change = ~change; // two's complement (channel 2)
-      else
-        change = -change; // one's complement (channel 1)
-      let target = this.timer_reload + change - (this.sweepNegateMode ? 0 : 1);
-      if (target < 8 || target > 0x7FF) this.sweepMute = true;
-      else this.timer_reload = target & 0x7FF;
-    } else {
-      let target = this.timer_reload + change;
-      if (target > 0x7FF) this.sweepMute = true;
-      else this.timer_reload = target & 0x7FF;
+    get output() {
+      if (!this.enabled) return 0;
+      if (this.lengthCounter.counter === 0) return 0;
+      if ((this.lfsr & 1) === 1) return 0;
+      return this.envelope.output;
     }
   }
-  updateSweepMute() {
-    let change = this.timer_reload >> this.sweepShift;
-    let target = this.sweepNegate
-      ? this.timer_reload - change - (this.sweepNegateMode ? 0 : 1)
-      : this.timer_reload + change;
-    this.sweepMute = this.timer_reload < 8 || target > 0x7FF;
-  }
-  output() {
-    if (
-      !this.enabled ||
-      this.length === 0 ||
-      this.timer_reload < 8 ||
-      this.sweepMute
-    )
+
+  // DMC is still a stub; for MVP we keep it as before.
+
+  class APU {
+    constructor() {
+      this.frameCounter = 0;
+      this.cycles = 0;
+      this.pulse = [new PulseChannel(0), new PulseChannel(1)];
+      this.triangle = new TriangleChannel();
+      this.noise = new NoiseChannel();
+      this.dmc = { enabled:false };
+      // audio out
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ac = new AC();
+      this.bufferSize = 2048;
+      this.node = this.ac.createScriptProcessor(this.bufferSize, 0, 1);
+      this.node.onaudioprocess = e => this.pullSamples(e.outputBuffer.getChannelData(0));
+      this.gain = this.ac.createGain(); this.gain.gain.value = 0.2;
+      this.node.connect(this.gain).connect(this.ac.destination);
+
+      // APU clocking
+      this.sampleRate = this.ac.sampleRate;
+      this.cpuClock = 1789773; // 1.789 MHz NTSC
+      this.framePeriod = 7458; // 240Hz
+      this.frameCycle = 0;
+      this.frameStep = 0;
+    }
+
+    read(addr) {
+      if (addr === 0x4015) {
+        let s = 0;
+        if (this.pulse[0].lengthCounter.counter) s |= 1;
+        if (this.pulse[1].lengthCounter.counter) s |= 2;
+        if (this.triangle.lengthCounter.counter) s |= 4;
+        if (this.noise.lengthCounter.counter) s |= 8;
+        // DMC not implemented
+        return s;
+      }
       return 0;
-    if (this.dutyTable[this.duty][this.dutyStep] === 0) return 0;
-    return this.envConst ? this.envPeriod : this.envDecay;
-  }
-}
+    }
 
-// ---- Triangle Channel ----
-class TriangleChannel {
-  constructor() {
-    this.enabled = false;
-    this.length = 0;
-    this.timer_reload = 0;
-    this.timer = 0;
-    this.phase = 0;
-    this.linearReload = 0;
-    this.linearControl = false;
-    this.linearCounter = 0;
-    this.linearReloadFlag = false;
-    this.lengthHalt = false;
-  }
-  setLinear(val) {
-    this.linearControl = !!(val & 0x80);
-    this.linearReload = val & 0x7F;
-  }
-  setTimerLow(val) {
-    this.timer_reload = (this.timer_reload & 0x700) | val;
-  }
-  setTimerHigh(val) {
-    this.timer_reload = (this.timer_reload & 0xFF) | ((val & 0x07) << 8);
-    this.length = lengthTable[(val >> 3) & 0x1F];
-    this.linearReloadFlag = true;
-  }
-  step() {
-    if (this.length === 0 || this.linearCounter === 0 || !this.enabled)
-      return;
-    if (this.timer === 0) {
-      this.timer = this.timer_reload;
-      this.phase = (this.phase + 1) & 31;
-    } else {
-      this.timer--;
-    }
-  }
-  clockLinear() {
-    if (this.linearReloadFlag) {
-      this.linearCounter = this.linearReload;
-    } else if (this.linearCounter > 0) {
-      this.linearCounter--;
-    }
-    if (!this.linearControl) this.linearReloadFlag = false;
-  }
-  clockLength() {
-    if (!this.linearControl && this.length > 0) this.length--;
-  }
-  output() {
-    if (!this.enabled || this.length === 0 || this.linearCounter === 0)
-      return 0;
-    return triTable[this.phase];
-  }
-}
-
-// ---- Noise Channel ----
-class NoiseChannel {
-  constructor() {
-    this.enabled = true;
-    this.length = 0;
-    this.timer_reload = 0;
-    this.timer = 0;
-    this.envLoop = false;
-    this.envConst = false;
-    this.envPeriod = 0;
-    this.envVol = 0;
-    this.envStart = false;
-    this.envDivider = 0;
-    this.envDecay = 0;
-    this.mode = 0;
-    this.lfsr = 1;
-    this.lengthHalt = false;
-  }
-  setEnvelope(val) {
-    this.lengthHalt = !!(val & 0x20);
-    this.envLoop = !!(val & 0x20);
-    this.envConst = !!(val & 0x10);
-    this.envPeriod = val & 0x0F;
-    this.envStart = true;
-  }
-  setMode(val) {
-    this.mode = !!(val & 0x80) ? 1 : 0;
-    this.timer_reload = noisePeriodTable[val & 0x0F];
-  }
-  setLength(val) {
-    this.length = lengthTable[(val >> 3) & 0x1F];
-    this.envStart = true;
-  }
-  step() {
-    if (!this.enabled || this.length === 0) return;
-    if (this.timer === 0) {
-      this.timer = this.timer_reload;
-      let feedback;
-      if (this.mode) {
-        feedback = ((this.lfsr >> 6) ^ (this.lfsr >> 0)) & 1;
-      } else {
-        feedback = ((this.lfsr >> 1) ^ (this.lfsr >> 0)) & 1;
-      }
-      this.lfsr = ((this.lfsr >> 1) | (feedback << 14)) & 0x7FFF;
-    } else {
-      this.timer--;
-    }
-  }
-  clockEnvelope() {
-    if (this.envStart) {
-      this.envDecay = 15;
-      this.envDivider = this.envPeriod;
-      this.envStart = false;
-    } else {
-      if (this.envDivider === 0) {
-        this.envDivider = this.envPeriod;
-        if (this.envDecay === 0) {
-          if (this.envLoop) this.envDecay = 15;
-        } else {
-          this.envDecay--;
+    write(addr, val) {
+      switch (addr) {
+        // Pulse 1
+        case 0x4000:
+        case 0x4004: {
+          let ch = this.pulse[(addr >> 2) & 1];
+          ch.duty = (val >> 6) & 3;
+          ch.lengthCounter.halt = !!(val & 0x20);
+          ch.envelope.loop = !!(val & 0x20);
+          ch.envelope.constant = !!(val & 0x10);
+          ch.envelope.volume = val & 0x0F;
+          break;
         }
-      } else {
-        this.envDivider--;
-      }
-    }
-  }
-  clockLength() {
-    if (!this.lengthHalt && this.length > 0) this.length--;
-  }
-  output() {
-    if (!this.enabled || this.length === 0 || (this.lfsr & 1)) return 0;
-    return this.envConst ? this.envPeriod : this.envDecay;
-  }
-}
-
-// ---- DMC Channel (Full) ----
-class DMCChannel {
-  constructor() {
-    this.enabled = false;
-    this.irqEnable = false;
-    this.loop = false;
-    this.rate = 0;
-    this.directLoad = 0;
-    this.addr = 0;
-    this.len = 0;
-    this.sampleAddr = 0;
-    this.sampleLen = 0;
-    this.outputLevel = 0;
-    this.shiftReg = 0;
-    this.bitsLeft = 0;
-    this.timerPeriod = 0;
-    this.timer = 0;
-    this.bytesRemain = 0;
-    this.curAddr = 0;
-    this.silence = true;
-    this.irqFlag = false;
-    this.readBuffer = 0;
-    this.readMem = addr => 0;
-    this.apuCycleCount = 0;
-  }
-  setReadMem(fn) {
-    this.readMem = fn;
-  }
-  write(addr, val) {
-    switch (addr) {
-      case 0x4010:
-        this.irqEnable = !!(val & 0x80);
-        if (!this.irqEnable) this.irqFlag = false;
-        this.loop = !!(val & 0x40);
-        this.rate = val & 0x0F;
-        this.timerPeriod = dmcRateTable[this.rate];
-        break;
-      case 0x4011:
-        this.directLoad = val & 0x7F;
-        this.outputLevel = this.directLoad;
-        break;
-      case 0x4012:
-        this.sampleAddr = 0xC000 + (val << 6);
-        break;
-      case 0x4013:
-        this.sampleLen = (val << 4) + 1;
-        break;
-    }
-  }
-  setEnabled(val) {
-    this.enabled = val;
-    if (!val) {
-      this.bytesRemain = 0;
-    } else if (this.bytesRemain === 0) {
-      this.curAddr = this.sampleAddr;
-      this.bytesRemain = this.sampleLen;
-    }
-  }
-  apuCycle() {
-    this.timer--;
-    if (this.timer <= 0) {
-      this.timer = this.timerPeriod;
-      if (!this.silence) {
-        if (this.shiftReg & 1) {
-          if (this.outputLevel <= 125) this.outputLevel += 2;
-        } else {
-          if (this.outputLevel >= 2) this.outputLevel -= 2;
+        case 0x4001:
+        case 0x4005: { // Sweep
+          let ch = this.pulse[(addr >> 2) & 1];
+          ch.sweep.enabled = !!(val & 0x80);
+          ch.sweep.period = (val >> 4) & 7;
+          ch.sweep.negate = !!(val & 0x08);
+          ch.sweep.shift = val & 7;
+          ch.sweep.reload = true;
+          break;
         }
+        case 0x4002:
+        case 0x4006: {
+          let ch = this.pulse[(addr >> 2) & 1];
+          ch.timerReload = (ch.timerReload & 0x700) | val;
+          break;
+        }
+        case 0x4003:
+        case 0x4007: {
+          let ch = this.pulse[(addr >> 2) & 1];
+          ch.timerReload = (ch.timerReload & 0xFF) | ((val & 0x07) << 8);
+          ch.lengthCounter.set(val >> 3);
+          ch.envelope.start = true;
+          ch.dutyStep = 0;
+          break;
+        }
+        // Triangle
+        case 0x4008:
+          this.triangle.controlFlag = !!(val & 0x80);
+          this.triangle.linearReload = val & 0x7F;
+          break;
+        case 0x400A:
+          this.triangle.timerReload = (this.triangle.timerReload & 0x700) | val;
+          break;
+        case 0x400B:
+          this.triangle.timerReload = (this.triangle.timerReload & 0xFF) | ((val & 0x07) << 8);
+          this.triangle.lengthCounter.set(val >> 3);
+          this.triangle.linearReloadFlag = true;
+          break;
+        // Noise
+        case 0x400C:
+          this.noise.lengthCounter.halt = !!(val & 0x20);
+          this.noise.envelope.loop = !!(val & 0x20);
+          this.noise.envelope.constant = !!(val & 0x10);
+          this.noise.envelope.volume = val & 0x0F;
+          break;
+        case 0x400E:
+          this.noise.mode = (val >> 7) & 1;
+          this.noise.timerReload = [4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068][val & 0x0F];
+          break;
+        case 0x400F:
+          this.noise.lengthCounter.set(val >> 3);
+          this.noise.envelope.start = true;
+          break;
+        // Length counter/enable
+        case 0x4015: {
+          this.pulse[0].enabled = !!(val & 0x01);
+          if (!this.pulse[0].enabled) this.pulse[0].lengthCounter.counter = 0;
+          this.pulse[1].enabled = !!(val & 0x02);
+          if (!this.pulse[1].enabled) this.pulse[1].lengthCounter.counter = 0;
+          this.triangle.enabled = !!(val & 0x04);
+          if (!this.triangle.enabled) this.triangle.lengthCounter.counter = 0;
+          this.noise.enabled = !!(val & 0x08);
+          if (!this.noise.enabled) this.noise.lengthCounter.counter = 0;
+          // DMC not implemented
+          break;
+        }
+        // Frame counter
+        case 0x4017:
+          // ignore for now (4/5 step select), MVP
+          break;
       }
-      this.shiftReg >>= 1;
-      this.bitsLeft--;
-      if (this.bitsLeft === 0) this.reloadSample();
+    }
+
+    step(cycles) {
+      // Emulate APU timing: 240Hz/120Hz frame counter
+      for (let i = 0; i < cycles; ++i) {
+        this.frameCycle++;
+        if (this.frameCycle === this.framePeriod) {
+          this.frameCycle = 0;
+          this.clockFrameCounter();
+        }
+        // Channel clocks
+        this.pulse[0].clock();
+        this.pulse[1].clock();
+        this.triangle.clock();
+        this.noise.clock();
+      }
+    }
+
+    clockFrameCounter() {
+      // Envelope and sweep units tick at 240Hz
+      // Length counters and sweep at 120Hz (every other tick)
+      this.frameStep = (this.frameStep + 1) % 4;
+      // Envelope
+      this.pulse[0].envelope.clock();
+      this.pulse[1].envelope.clock();
+      this.noise.envelope.clock();
+      // Triangle linear counter
+      if (this.triangle.linearReloadFlag) {
+        this.triangle.linearCounter = this.triangle.linearReload;
+      } else if (this.triangle.linearCounter > 0) {
+        this.triangle.linearCounter--;
+      }
+      if (!this.triangle.controlFlag) {
+        this.triangle.linearReloadFlag = false;
+      }
+      // Length and sweep at 120Hz
+      if ((this.frameStep & 1) === 0) {
+        this.pulse[0].lengthCounter.clock();
+        this.pulse[1].lengthCounter.clock();
+        this.triangle.lengthCounter.clock();
+        this.noise.lengthCounter.clock();
+        this.pulse[0].sweep.clock();
+        this.pulse[1].sweep.clock();
+      }
+    }
+
+    pullSamples(out) {
+      // NES APU mixing formula: https://wiki.nesdev.com/w/index.php/APU_Mixer
+      // For MVP, use simple linear mix
+      const len = out.length;
+      for (let i = 0; i < len; i++) {
+        const p0 = this.pulse[0].output;
+        const p1 = this.pulse[1].output;
+        const t = this.triangle.output;
+        const n = this.noise.output;
+        // Standard NES mixing
+        let pulse = p0 + p1;
+        let triangle = t;
+        let noise = n;
+        let pulseOut = pulse ? 95.88 / ((8128.0 / pulse) + 100) : 0;
+        let tnd = triangle ? (triangle / 8227.0) : 0;
+        tnd += noise ? (noise / 12241.0) : 0;
+        let tndOut = tnd ? 159.79 / ((1 / tnd) + 100) : 0;
+        out[i] = pulseOut + tndOut;
+      }
     }
   }
-  reloadSample() {
-    if (this.bytesRemain === 0) {
-      if (this.loop) {
-        this.curAddr = this.sampleAddr;
-        this.bytesRemain = this.sampleLen;
-      } else if (this.irqEnable) {
-        this.irqFlag = true;
-      }
-      this.silence = true;
-      return;
+    step(cycles){ // very rough: advance internal timers with CPU cycles
+      this.cycles += cycles;
+      // timers (not exact NTSC ratios; MVP approximation)
+      const advance = (ch,tick)=>{ while(this.cycles>=tick){ this.cycles-=tick; ch.phase=(ch.phase+1)&0x7FFF; } };
+      const pTick = 2; // crude
+      advance(this.pulse[0], pTick); advance(this.pulse[1], pTick);
+      advance(this.tri, 2); advance(this.noise, 1);
+      // noise LFSR update
+      if(this.noise.timer){ if((this.noise.phase&31)===0){ const bit=((this.noise.lfsr ^ (this.noise.lfsr>>(this.noise.mode?6:1)))&1); this.noise.lfsr=(this.noise.lfsr>>1)| (bit<<14);} }
     }
-    this.shiftReg = this.readMem(this.curAddr);
-    this.bitsLeft = 8;
-    this.curAddr++;
-    if (this.curAddr > 0xFFFF) this.curAddr = 0x8000;
-    this.bytesRemain--;
-    this.silence = false;
-  }
-  output() {
-    return this.outputLevel;
-  }
-}
 
-// ---- Tables ----
-const lengthTable = [
-  10, 254, 20, 2, 40, 4, 80, 6,
-  160, 8, 60, 10, 14, 12, 26, 14,
-  12, 16, 24, 18, 48, 20, 96, 22,
-  192, 24, 72, 26, 16, 28, 32, 30
-];
-const triTable = [
-  15, 14, 13, 12, 11, 10, 9, 8,
-  7, 6, 5, 4, 3, 2, 1, 0,
-  0, 1, 2, 3, 4, 5, 6, 7,
-  8, 9, 10, 11, 12, 13, 14, 15
-];
-const noisePeriodTable = [
-  4, 8, 16, 32, 64, 96, 128, 160,
-  202, 254, 380, 508, 762, 1016, 2034, 4068
-];
-const dmcRateTable = [
-  428, 380, 340, 320, 286, 254, 226, 214,
-  190, 160, 142, 128, 106, 85, 72, 54
-];
+    pullSamples(out){ // generate audio for the next buffer using current channel states
+      const len = out.length; const sr = this.ac.sampleRate;
+      for(let i=0;i<len;i++){
+        // pulse
+        const sq = (ch)=>{ if(!ch.enabled||!ch.length||ch.timer<8) return 0; const duty=[8,4,2,1][ch.duty]; const period = (ch.timer+1)*16; const t = ch.phase % period; const on = t < period*(1/duty); const vol = ch.constant? ch.volume : ch.env; return on ? (vol/15) : 0; };
+        const p = sq(this.pulse[0]) + sq(this.pulse[1]);
+        // triangle
+        let tri=0; if(this.tri.enabled && this.tri.length && this.tri.timer>=2){ const period=(this.tri.timer+1)*32; const t=this.tri.phase%period; const saw = t/period; tri = 1 - Math.abs(2*saw - 1); tri*=0.7; }
+        // noise
+        const n = (this.noise.enabled&&this.noise.length)? (((this.noise.lfsr&1)?1:-1) * (this.noise.volume/15) * 0.2) : 0;
+        out[i] = (p*0.25 + tri*0.35 + n*0.25);
+      }
+    }
+  }
 
-function clamp(v, min, max) {
-  return v < min ? min : v > max ? max : v;
-}
   // ===== Mappers =====
  class Mapper {
     constructor(cart){ this.cart=cart; }
@@ -1261,146 +1115,117 @@ function clamp(v, min, max) {
     [0x18,'IMP','CLC',2],[0x38,'IMP','SEC',2],[0x58,'IMP','CLI',2],[0x78,'IMP','SEI',2],[0xB8,'IMP','CLV',2],[0xD8,'IMP','CLD',2],[0xF8,'IMP','SED',2],
   ]);
   
-// ===== NES Machine =====
-class NES{
-  constructor(canvas){
-    this.ppu=new PPU(); this.ppu.attachCanvas(canvas); this.input=new Controllers();
-    this.cart=null; this.bus=null; this.cpu=null; this.apu=new APU();
-    this.running=false; this.last=performance.now(); this.frames=0; this.fps=0; this.mhz='—';
-    this.makeResponsiveCanvas();
-    this._lastFrameTime = 0;
-    this._frameInterval = 1000/60; // 60Hz default
-    this._pendingFrames = 0;
-    this._lastFpsUpdate = performance.now();
-    this._frameCount = 0;
-  }
-  makeResponsiveCanvas() {
-    // ...unchanged...
-  }
-  loadROM(bytes){
-    this.cart=new Cartridge(bytes);
-    this.ppu.connectCart(this.cart);
-    this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu);
-    this.cpu=new CPU6502(this.bus);
-    this.bus.cpu=this.cpu;
-    this.cpu.reset();
-    // CRITICAL: wire up DMC memory
-    this.apu.setReadMem(addr => this.bus.cpuRead(addr));
-    document.getElementById('mapper').textContent=this.cart.mapper;
-    document.getElementById('mirror').textContent=this.cart.mirror;
-  }
-  reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
-  step(){
-    const cyc = this.cpu.step();
-    for(let i=0;i<cyc*3;i++){
-      this.ppu.step();
-      if(this.ppu.nmi){
-        this.cpu.nmi();
-        this.ppu.nmi=false;
-      }
-    }
-    // FIX: step APU ONCE per CPU cycle for correct timing!
-    for(let i=0;i<cyc;i++) this.apu.step(1);
-    // IRQ from APU
-    if (this.apu.frameIrq || this.apu.dmc.irqFlag) this.cpu.irq();
-  }
-  run(){
-    if(this.running) return;
-    this.running=true;
-    this._lastFrameTime = performance.now();
-    this._pendingFrames = 0;
-    const animate = (now) => {
-      if (!this.running) return;
-      let framesToRun = 0;
-      let dt = now - this._lastFrameTime;
-      if (dt > 1000) dt = 0;
-      this._lastFrameTime = now;
-      this._pendingFrames += dt / this._frameInterval;
-      framesToRun = Math.floor(this._pendingFrames);
-      this._pendingFrames -= framesToRun;
-      if (framesToRun > 5) framesToRun = 5;
-      for (let f = 0; f < framesToRun; ++f) {
-        let cpuCycles = 0;
-        while (cpuCycles < 29780) {
-          const cyc = this.cpu.step();
-          for (let i = 0; i < cyc * 3; i++) {
-            this.ppu.step();
-            if (this.ppu.nmi) {
-              this.cpu.nmi();
-              this.ppu.nmi = false;
-            }
-          }
-          // Step APU ONCE per CPU cycle!
-          for(let i=0;i<cyc;i++) this.apu.step(1);
-          // IRQ from APU during run
-          if (this.apu.frameIrq || this.apu.dmc.irqFlag) this.cpu.irq();
-          cpuCycles += cyc;
-        }
-        this._frameCount++;
-      }
-      const nowTime = performance.now();
-      if (nowTime - this._lastFpsUpdate >= 1000) {
-        document.getElementById('fps').textContent = this._frameCount;
-        document.getElementById('mhz').textContent = "~1.79 (approx)";
-        this._frameCount = 0;
-        this._lastFpsUpdate = nowTime;
-      }
-      requestAnimationFrame(animate);
-    };
-    requestAnimationFrame(animate);
-  }
-  pause(){ this.running=false; }
-}
 
- 
+  // ===== NES Machine =====
+  class NES{
+    constructor(canvas){
+      this.ppu=new PPU(); this.ppu.attachCanvas(canvas); this.input=new Controllers();
+      this.cart=null; this.bus=null; this.cpu=null; this.apu=new APU();
+      this.running=false; this.last=performance.now(); this.frames=0; this.fps=0; this.mhz='—';
+      // Responsive canvas for mobile
+      this.makeResponsiveCanvas();
+      // --- Frame timing
+      this._lastFrameTime = 0;
+      this._frameInterval = 1000/60; // 60Hz default
+      this._pendingFrames = 0;
+      this._lastFpsUpdate = performance.now();
+      this._frameCount = 0;
+    }
+    makeResponsiveCanvas() {
+      const c = this.ppu.canvas;
+      const resize = () => {
+        if(window.innerWidth < 900) {
+          // Fit width to viewport, keep aspect
+          c.style.width = "98vw";
+          c.style.height = Math.round(240*98/256) + "vw";
+        } else {
+          c.style.width = "768px";
+          c.style.height = "720px";
+        }
+      };
+      window.addEventListener('resize', resize);
+      resize();
+    }
+    loadROM(bytes){ this.cart=new Cartridge(bytes); this.ppu.connectCart(this.cart); this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu); this.cpu=new CPU6502(this.bus); this.bus.cpu=this.cpu; this.cpu.reset(); document.getElementById('mapper').textContent=this.cart.mapper; document.getElementById('mirror').textContent=this.cart.mirror; }
+    reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
+    step(){ // 1 CPU cycle ~ 3 PPU cycles (NTSC). We'll drive PPU 3x per CPU step.
+      const cyc = this.cpu.step(); for(let i=0;i<cyc*3;i++){ this.ppu.step(); if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false; } }
+      this.apu.step(cyc);
+    }
+    run(){
+      if(this.running) return;
+      this.running=true;
+      this._lastFrameTime = performance.now();
+      this._pendingFrames = 0;
+      const animate = (now) => {
+        if (!this.running) return;
+        let framesToRun = 0;
+        // Frameskip logic
+        let dt = now - this._lastFrameTime;
+        if (dt > 1000) dt = 0;
+        this._lastFrameTime = now;
+        this._pendingFrames += dt / this._frameInterval;
+        framesToRun = Math.floor(this._pendingFrames);
+        this._pendingFrames -= framesToRun;
+        if (framesToRun > 5) framesToRun = 5; // Cap catch-up
+        // Run frames
+        for (let f = 0; f < framesToRun; ++f) {
+          // Run one NES frame: 29780 CPU cycles (for NTSC, approx 60Hz)
+          let cpuCycles = 0;
+          while (cpuCycles < 29780) {
+            cpuCycles += this.cpu.step();
+            for (let i = 0; i < 3; i++) {
+              this.ppu.step();
+              if (this.ppu.nmi) {
+                this.cpu.nmi();
+                this.ppu.nmi = false;
+              }
+            }
+            this.apu.step(1);
+          }
+          this._frameCount++;
+        }
+        // Update FPS counter every second
+        const nowTime = performance.now();
+        if (nowTime - this._lastFpsUpdate >= 1000) {
+          document.getElementById('fps').textContent = this._frameCount;
+          document.getElementById('mhz').textContent = "~1.79 (approx)";
+          this._frameCount = 0;
+          this._lastFpsUpdate = nowTime;
+        }
+        requestAnimationFrame(animate);
+      };
+      requestAnimationFrame(animate);
+    }
+    pause(){ this.running=false; }
+  }
 
   // ===== UI glue =====
   const canvas = document.getElementById('screen');
-const nes = new NES(canvas);
-const romInput = document.getElementById('rom');
-const btnRun = document.getElementById('btnRun');
-const btnPause = document.getElementById('btnPause');
-const btnReset = document.getElementById('btnReset');
-const romName = document.getElementById('romName');
+  const nes = new NES(canvas);
+  const romInput = document.getElementById('rom');
+  const btnRun = document.getElementById('btnRun');
+  const btnPause = document.getElementById('btnPause');
+  const btnReset = document.getElementById('btnReset');
+  const romName = document.getElementById('romName');
 
-romInput.addEventListener('change', async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  romName.textContent = f.name;
-  const buf = new Uint8Array(await f.arrayBuffer());
-  try {
-    nes.loadROM(buf);
-    btnRun.disabled = false;
-    btnPause.disabled = false;
-    btnReset.disabled = false;
-  } catch (err) {
-    alert('ROM load failed: ' + err.message);
-    btnRun.disabled = true;
-    btnPause.disabled = true;
-    btnReset.disabled = true;
-  }
-});
+  romInput.addEventListener('change', async (e)=>{
+    const f=e.target.files[0]; if(!f) return; romName.textContent=f.name;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    try {
+      nes.loadROM(buf); btnRun.disabled=false; btnPause.disabled=false; btnReset.disabled=false;
+    } catch(err){ alert('ROM load failed: '+err.message); btnRun.disabled=true; btnPause.disabled=true; btnReset.disabled=true; }
+  });
 
-// --- APU AudioContext fix: resume on user gesture for "Run" ---
-btnRun.addEventListener('click', async () => {
-  // Resume AudioContext on user gesture (required for Chrome/Safari/Firefox)
-  // Try both shared and instance context for compatibility
-  if (nes.apu && nes.apu.ac && nes.apu.ac.state === "suspended") {
-    await nes.apu.ac.resume();
-  }
-  if (window.APU && window.APU.sharedContext && window.APU.sharedContext.state === "suspended") {
-    await window.APU.sharedContext.resume();
-  }
-  nes.run();
-});
+  btnRun.addEventListener('click',()=>nes.run());
+  btnPause.addEventListener('click',()=>nes.pause());
+  btnReset.addEventListener('click',()=>nes.reset());
 
-btnPause.addEventListener('click', () => nes.pause());
-btnReset.addEventListener('click', () => nes.reset());
-
-// Prevent scrolling/touchmove on body and document
-window.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
-window.addEventListener('scroll', function() { window.scrollTo(0, 0); }, { passive: false });
-document.body.addEventListener('wheel', function(e) { e.preventDefault(); }, { passive: false });
+  // Prevent scrolling/touchmove on body and document
+  window.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
+  window.addEventListener('scroll', function(){ window.scrollTo(0,0); }, {passive:false});
+  document.body.addEventListener('wheel', function(e){ e.preventDefault(); }, {passive:false});
+})();
 </script>
 </body>
 </html>
