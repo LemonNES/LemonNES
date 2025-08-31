@@ -11,14 +11,20 @@ built with help from ChatGPT
 
 • Palette Discolorations
 
-# Tested Games 
+# Compatibility
 
-• Super Mario Bros
+• Super Mario Bros - Playable But With Graphical Issues
 
-• Balloon Fight
+• Balloon Fight - Playable But With Graphical Issues
 
-• Exitebike 
+• Exitebike - Playable But With Graphical Issues
 
-• Bubble Bobble
+• Bubble Bobble - Playable But With Graphical Issues
 
-• Donkey Kong
+• Donkey Kong - Playable But With Graphical Issues
+
+• Kirby's Adventure - Doesn't Boot
+
+• Super Mario Bros 2 - Doesn't Boot
+
+• Super Mario Bros 3 - Doesn't Boot
