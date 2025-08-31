@@ -1356,30 +1356,51 @@ class NES{
 
   // ===== UI glue =====
   const canvas = document.getElementById('screen');
-  const nes = new NES(canvas);
-  const romInput = document.getElementById('rom');
-  const btnRun = document.getElementById('btnRun');
-  const btnPause = document.getElementById('btnPause');
-  const btnReset = document.getElementById('btnReset');
-  const romName = document.getElementById('romName');
+const nes = new NES(canvas);
+const romInput = document.getElementById('rom');
+const btnRun = document.getElementById('btnRun');
+const btnPause = document.getElementById('btnPause');
+const btnReset = document.getElementById('btnReset');
+const romName = document.getElementById('romName');
 
-  romInput.addEventListener('change', async (e)=>{
-    const f=e.target.files[0]; if(!f) return; romName.textContent=f.name;
-    const buf = new Uint8Array(await f.arrayBuffer());
-    try {
-      nes.loadROM(buf); btnRun.disabled=false; btnPause.disabled=false; btnReset.disabled=false;
-    } catch(err){ alert('ROM load failed: '+err.message); btnRun.disabled=true; btnPause.disabled=true; btnReset.disabled=true; }
-  });
+romInput.addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  romName.textContent = f.name;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  try {
+    nes.loadROM(buf);
+    btnRun.disabled = false;
+    btnPause.disabled = false;
+    btnReset.disabled = false;
+  } catch (err) {
+    alert('ROM load failed: ' + err.message);
+    btnRun.disabled = true;
+    btnPause.disabled = true;
+    btnReset.disabled = true;
+  }
+});
 
-  btnRun.addEventListener('click',()=>nes.run());
-  btnPause.addEventListener('click',()=>nes.pause());
-  btnReset.addEventListener('click',()=>nes.reset());
+// --- APU AudioContext fix: resume on user gesture for "Run" ---
+btnRun.addEventListener('click', async () => {
+  // Resume AudioContext on user gesture (required for Chrome/Safari/Firefox)
+  // Try both shared and instance context for compatibility
+  if (nes.apu && nes.apu.ac && nes.apu.ac.state === "suspended") {
+    await nes.apu.ac.resume();
+  }
+  if (window.APU && window.APU.sharedContext && window.APU.sharedContext.state === "suspended") {
+    await window.APU.sharedContext.resume();
+  }
+  nes.run();
+});
 
-  // Prevent scrolling/touchmove on body and document
-  window.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
-  window.addEventListener('scroll', function(){ window.scrollTo(0,0); }, {passive:false});
-  document.body.addEventListener('wheel', function(e){ e.preventDefault(); }, {passive:false});
-})();
+btnPause.addEventListener('click', () => nes.pause());
+btnReset.addEventListener('click', () => nes.reset());
+
+// Prevent scrolling/touchmove on body and document
+window.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+window.addEventListener('scroll', function() { window.scrollTo(0, 0); }, { passive: false });
+document.body.addEventListener('wheel', function(e) { e.preventDefault(); }, { passive: false });
 </script>
 </body>
 </html>
