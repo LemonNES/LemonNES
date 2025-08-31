@@ -853,7 +853,11 @@
   this._lastFpsUpdate = performance.now();
   this._frameCount = 0;
   runFrame();
-}
+}}
+      requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+  }
 
   // ===== UI glue =====
   const canvas = document.getElementById('screen');
