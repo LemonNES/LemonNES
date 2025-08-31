@@ -19,7 +19,7 @@ built with help from ChatGPT
 
 • Exitebike - Playable But With Graphical Issues
 
-• Bubble Bobble - Playable But With Graphical Issues
+• Bubble Bobble - Playable But With Major Graphical Issues
 
 • Donkey Kong - Playable But With Graphical Issues
 
