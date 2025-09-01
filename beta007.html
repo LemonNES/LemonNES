@@ -183,37 +183,6 @@
   </div>
 
 <script>
-  const mobileControls = document.getElementById('mobile-controls'); // your mobile controls container
-  const canvas = document.getElementById('nes-canvas');
-
-  // Detect fullscreen change
-  function onFullscreenChange() {
-    if (document.fullscreenElement || document.webkitFullscreenElement) {
-      // Fullscreen active
-      mobileControls.style.display = 'flex'; // show mobile controls
-      mobileControls.style.position = 'absolute';
-      mobileControls.style.bottom = '10px';
-      mobileControls.style.width = '100%';
-      mobileControls.style.justifyContent = 'center';
-    } else {
-      // Fullscreen exited
-      mobileControls.style.display = 'none';
-    }
-  }
-
-  document.addEventListener('fullscreenchange', onFullscreenChange);
-  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
-
-  // Optional: toggle fullscreen via a button
-  document.getElementById('fullscreen-btn').addEventListener('click', () => {
-    if (!document.fullscreenElement) {
-      canvas.requestFullscreen?.();
-      canvas.webkitRequestFullscreen?.(); // Safari
-    } else {
-      document.exitFullscreen?.();
-      document.webkitExitFullscreen?.();
-    }
-  
   document.getElementById("fullscreen").addEventListener("click", () => {
   const canvas = document.querySelector("canvas");
   if (!document.fullscreenElement) {
