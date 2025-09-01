@@ -29,5 +29,8 @@ built with help from ChatGPT
 
 • Super Mario Bros 3 - Doesn't Boot
 
+# Beta
+LemonNES Is Currently In Beta, If You Find Any Issues With The Code, Please Report Them By Creating A Pull Request.
+
 # Disclaimer
  NES is a trademark of Nintendo. LemonNES isn't associated with Nintendo in any way.
