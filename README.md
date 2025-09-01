@@ -28,3 +28,6 @@ built with help from ChatGPT
 • Super Mario Bros 2 - Doesn't Boot
 
 • Super Mario Bros 3 - Doesn't Boot
+
+# Disclaimer
+ NES is a trademark of Nintendo. LemonNES isn't associated with Nintendo in any way.
