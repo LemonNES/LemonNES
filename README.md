@@ -23,7 +23,7 @@ built with help from ChatGPT
 
 • Donkey Kong - Playable But With Major Graphical Issues
 
-• Kirby's Adventure - Boots, Palette Loads, But Is Not Playable
+• Kirby's Adventure - Boots, Palette Loads With Incorrect Coloring, But Is Not Playable
 
 • Super Mario Bros 2 - Doesn't Boot
 
