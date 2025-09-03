@@ -192,12 +192,6 @@
   const u8 = n => n & 0xFF;
   const u16 = n => n & 0xFFFF;
   const toHex=(n,len=2)=>('0'.repeat(len)+n.toString(16).toUpperCase()).slice(-len);
-  function reverseByte(b) {
-    b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4);
-    b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2);
-    b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1);
-    return b;
-  }
   // ===== Controllers =====
   class Controllers{
     constructor(){
