@@ -977,31 +977,101 @@
     }
 
   // ===== UI glue =====
-  const canvas = document.getElementById('screen');
-  const nes = new NES(canvas);
+document.addEventListener("DOMContentLoaded", () => {
   const romInput = document.getElementById('rom');
   const btnRun = document.getElementById('btnRun');
   const btnPause = document.getElementById('btnPause');
   const btnReset = document.getElementById('btnReset');
   const romName = document.getElementById('romName');
+  const canvas = document.getElementById('screen');
 
-  romInput.addEventListener('change', async (e)=>{
-    const f=e.target.files[0]; if(!f) return; romName.textContent=f.name;
-    const buf = new Uint8Array(await f.arrayBuffer());
+  let nes = null;
+  let rafId = null;
+
+  function initNES(bytes) {
     try {
-      nes.loadROM(buf); btnRun.disabled=false; btnPause.disabled=false; btnReset.disabled=false;
-    } catch(err){ alert('ROM load failed: '+err.message); btnRun.disabled=true; btnPause.disabled=true; btnReset.disabled=true; }
+      const cart = new Cartridge(bytes);
+      const ppu = new PPU();
+      ppu.attachCanvas(canvas);
+      ppu.connectCart(cart);
+      const input = new Controllers();
+      const apu = new APU();
+      const cpu = new CPU6502(null);
+      const bus = new Bus(cpu, ppu, cart, input, apu);
+      cpu.bus = bus;
+      cpu.reset();
+      console.log("NES initialized successfully");
+      return { cpu, ppu, apu };
+    } catch (err) {
+      console.error("Failed to init NES:", err);
+      alert("Error: " + err.message);
+      return null;
+    }
+  }
+
+  function frame(nes) {
+    const {cpu, ppu} = nes;
+    let cycles = 29781;
+    while (cycles > 0) {
+      const c = cpu.step();
+      for (let i = 0; i < c*3; i++) ppu.step();
+      cycles -= c;
+      if (ppu.nmi) { ppu.nmi=false; cpu.nmi(); }
+    }
+  }
+
+  function runNES(nes) {
+    function loop() {
+      frame(nes);
+      rafId = requestAnimationFrame(loop);
+    }
+    loop();
+  }
+
+  function pauseNES() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+
+  function resetNES(nes) {
+    nes.cpu.reset();
+    nes.ppu.reset();
+  }
+
+  // Enable Run when ROM chosen
+  romInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    romName.textContent = file.name;
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    nes = initNES(bytes);
+    if (nes) {
+      btnRun.disabled = false;
+      btnReset.disabled = false;
+      console.log("ROM loaded:", file.name);
+    }
   });
 
-  btnRun.addEventListener('click',()=>nes.run());
-  btnPause.addEventListener('click',()=>nes.pause());
-  btnReset.addEventListener('click',()=>nes.reset());
+  btnRun.addEventListener('click', () => {
+    if (!nes) return;
+    runNES(nes);
+    btnRun.disabled = true;
+    btnPause.disabled = false;
+  });
 
-  // Prevent scrolling/touchmove on body and document
-  window.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
-  window.addEventListener('scroll', function(){ window.scrollTo(0,0); }, {passive:false});
-  document.body.addEventListener('wheel', function(e){ e.preventDefault(); }, {passive:false});
-})();
+  btnPause.addEventListener('click', () => {
+    if (!nes) return;
+    pauseNES();
+    btnRun.disabled = false;
+    btnPause.disabled = true;
+  });
+
+  btnReset.addEventListener('click', () => {
+    if (!nes) return;
+    resetNES(nes);
+  });
+});
 </script>
 </body>
 </html>
