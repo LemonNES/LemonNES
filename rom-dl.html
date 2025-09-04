@@ -21,101 +21,50 @@
 
     // --- PRG ROM (16KB) ---
     const prg = new Uint8Array(0x4000);
-
     let i = 0;
     function emit(...bytes){ for (let b of bytes) prg[i++] = b; }
 
-    // Reset vector entry ($8000)
-    // Disable interrupts
-    emit(0x78);              // SEI
-    emit(0xD8);              // CLD
-    emit(0xA2,0x40);         // LDX #$40 (stack ptr)
-    emit(0x9A);              // TXS
+    // Reset routine
+    emit(0x78); // SEI
+    emit(0xD8); // CLD
+    emit(0xA2,0x40); emit(0x9A); // LDX #$40, TXS
+    // wait vblank
+    emit(0xAD,0x02,0x20); emit(0x10,0xFB);
+    // PPUADDR=$2000
+    emit(0xA9,0x20); emit(0x8D,0x06,0x20);
+    emit(0xA9,0x00); emit(0x8D,0x06,0x20);
+    // Write HELLO (1,2,3,3,4)
+    for (let t of [1,2,3,3,4]) {
+      emit(0xA9,t); emit(0x8D,0x07,0x20);
+    }
+    // Enable background
+    emit(0xA9,0x08); emit(0x8D,0x00,0x20);
+    emit(0xA9,0x1E); emit(0x8D,0x01,0x20);
+    // Loop
+    emit(0x4C, i&0xFF, (0x80 + (i>>8))&0xFF);
 
-    // Wait for vblank (poll PPU status bit 7)
-    emit(0xAD,0x02,0x20);    // LDA $2002
-    emit(0x10,0xFB);         // BPL -5
+    // Vectors
+    prg[0x3FFA]=0x00; prg[0x3FFB]=0x80;
+    prg[0x3FFC]=0x00; prg[0x3FFD]=0x80;
+    prg[0x3FFE]=0x00; prg[0x3FFF]=0x80;
 
-    // Write "HELLO" into $2000 nametable
-    // Set PPUADDR = $2000
-    emit(0xA9,0x20); emit(0x8D,0x06,0x20); // LDA #$20 / STA $2006
-    emit(0xA9,0x00); emit(0x8D,0x06,0x20); // LDA #$00 / STA $2006
-
-    // Data: H=1, E=2, L=3, L=3, O=4
-    emit(0xA9,0x01); emit(0x8D,0x07,0x20); // STA $2007
-    emit(0xA9,0x02); emit(0x8D,0x07,0x20);
-    emit(0xA9,0x03); emit(0x8D,0x07,0x20);
-    emit(0xA9,0x03); emit(0x8D,0x07,0x20);
-    emit(0xA9,0x04); emit(0x8D,0x07,0x20);
-
-    // Enable background rendering
-    emit(0xA9,0x08); emit(0x8D,0x00,0x20); // LDA #$08 / STA $2000
-    emit(0xA9,0x1E); emit(0x8D,0x01,0x20); // LDA #$1E / STA $2001
-
-    // Infinite loop
-    emit(0x4C, i&0xFF, (0x80 + (i>>8))&0xFF); // JMP current addr
-
-    // Vectors at end
-    prg[0x3FFA] = 0x00; prg[0x3FFB] = 0x80; // NMI
-    prg[0x3FFC] = 0x00; prg[0x3FFD] = 0x80; // Reset
-    prg[0x3FFE] = 0x00; prg[0x3FFF] = 0x80; // IRQ
-
-    // --- CHR ROM (font, 8KB) ---
+    // --- CHR (simple font) ---
     const chr = new Uint8Array(0x2000);
-
-    // Simple 8x8 patterns for H, E, L, O
     function setTile(tileIndex, pattern){
       let base = tileIndex*16;
       for (let y=0;y<8;y++){
-        let row = pattern[y];
-        // plane 0 (bit0), plane1 (bit1) both same → white pixels
-        let lo=0,hi=0;
-        for (let x=0;x<8;x++){
-          if ((row>> (7-x)) & 1) lo |= (1<<(7-x));
-        }
-        chr[base+y] = lo;
+        let row = pattern[y]||0;
+        chr[base+y] = row; // plane 0 only
       }
     }
+    // crude tiles
+    setTile(1,[0x92,0x92,0xFE,0x92,0x92,0x92,0,0]); // H
+    setTile(2,[0xFE,0x80,0xF8,0x80,0xFE,0,0,0]);    // E
+    setTile(3,[0x80,0x80,0x80,0x80,0xFE,0,0,0]);    // L
+    setTile(4,[0x7C,0x82,0x82,0x82,0x7C,0,0,0]);    // O
 
-    // crude 8x8 letters
-    setTile(1,[0b10010010,
-               0b10010010,
-               0b11111110,
-               0b10010010,
-               0b10010010,
-               0b10010010,
-               0b00000000,
-               0b00000000]); // H
-
-    setTile(2,[0b11111110,
-               0b10000000,
-               0b11111000,
-               0b10000000,
-               0b11111110,
-               0b00000000,
-               0b00000000,
-               0b00000000]); // E
-
-    setTile(3,[0b10000000,
-               0b10000000,
-               0b10000000,
-               0b10000000,
-               0b11111110,
-               0b00000000,
-               0b00000000,
-               0b00000000]); // L
-
-    setTile(4,[0b01111100,
-               0b10000010,
-               0b10000010,
-               0b10000010,
-               0b01111100,
-               0b00000000,
-               0b00000000,
-               0b00000000]); // O
-
-    // --- Build final ROM ---
-    const rom = new Uint8Array(header.length + prg.length + chr.length);
+    // --- Combine ---
+    const rom = new Uint8Array(header.length+prg.length+chr.length);
     rom.set(header,0);
     rom.set(prg,header.length);
     rom.set(chr,header.length+prg.length);
@@ -124,9 +73,11 @@
     const blob = new Blob([rom], {type:"application/octet-stream"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href=url;
-    a.download="hello-text.nes";
-    a.click();
+    a.href = url;
+    a.download = "hello-text.nes";
+    document.body.appendChild(a);   // <-- append to DOM
+    a.click();                      // trigger click
+    document.body.removeChild(a);   // cleanup
     URL.revokeObjectURL(url);
   }
 
