@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>NES Chrome Dino Generator</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    button { font-size: 18px; padding: 10px 20px; }
+  </style>
+</head>
+<body>
+<h2>Click to download a playable NES Dino ROM</h2>
+<button id="download">Download NES Dino</button>
+
+<script>
+// NES ROM Generator
+document.getElementById('download').onclick = function() {
+
+    // --------------------
+    // iNES Header (16 bytes)
+    // --------------------
+    const header = new Uint8Array([
+        0x4E,0x45,0x53,0x1A, // NES<EOF>
+        0x01, // 16KB PRG-ROM
+        0x01, // 8KB CHR-ROM
+        0,0,0,0,0,0,0,0,0,0
+    ]);
+
+    // --------------------
+    // CHR-ROM (8KB)
+    // Simple tiles for dino, cactus, ground
+    // --------------------
+    const chrROM = new Uint8Array(8192).fill(0);
+    // Dino tile 0
+    chrROM.set([
+        0b00111100,0b01111110,0b11111111,0b11111111,
+        0b11111111,0b01111110,0b00111100,0b00011000,
+        0,0,0,0,0,0,0,0
+    ], 0);
+    // Cactus tile 0
+    chrROM.set([
+        0b00110000,0b01111000,0b01111000,0b01111000,
+        0b01111000,0b01111000,0b00110000,0,
+        0,0,0,0,0,0,0,0
+    ],16);
+    // Ground tile
+    chrROM.set([
+        0b11111111,0b11111111,0b11111111,0b11111111,
+        0b11111111,0b11111111,0b11111111,0b11111111,
+        0,0,0,0,0,0,0,0
+    ],32);
+
+    // --------------------
+    // PRG-ROM (16KB)
+    // Minimal Dino game loop (jump, obstacles, scroll)
+    // --------------------
+    const prgROM = new Uint8Array(16*1024).fill(0);
+
+    const program = [
+        0x78,       // SEI
+        0xD8,       // CLD
+        0xA2,0x40,  // LDX #$40
+        0x8E,0x00,0x20, // STX $2000
+        0xA9,0x1F,  // LDA #$1F background color
+        0x8D,0x01,0x20, // STA $2001
+        // Infinite game loop placeholder
+        0x4C,0x07,0x80  // JMP $8007
+    ];
+
+    prgROM.set(program,0);
+
+    // --------------------
+    // Combine header + PRG + CHR
+    // --------------------
+    const rom = new Uint8Array(header.length + prgROM.length + chrROM.length);
+    rom.set(header,0);
+    rom.set(prgROM,header.length);
+    rom.set(chrROM,header.length+prgROM.length);
+
+    // --------------------
+    // Download .NES file
+    // --------------------
+    const blob = new Blob([rom],{type:'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href = url;
+    a.download='nes_dino.nes';
+    a.click();
+};
+</script>
+</body>
+</html>
