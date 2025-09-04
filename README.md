@@ -12,6 +12,7 @@ built with help from ChatGPT
 • Palette Discolorations
 
 # Compatibility
+The Following Games Have Been Tested With LemonNES
 
 • Super Mario Bros - Playable But With Graphical Issues And Scrolling Bugs
 
@@ -20,6 +21,8 @@ built with help from ChatGPT
 • Exitebike - Playable But With Moderate Graphical Issues And Scrolling Bugs
 
 • Bubble Bobble - Playable But With Severe Graphical Issues
+
+• Bubble Bobble - Boots But With Severe Graphical Issues And Not Playable
 
 • Donkey Kong - Playable But With Major Graphical Issues
 
