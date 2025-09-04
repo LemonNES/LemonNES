@@ -154,8 +154,9 @@ function buildNES(){
   emit(0xA5,zp.cactusX); emit(0xC9,0x08); BCS(0x06); // if >=8, skip reset
   emit(0xA9,240); emit(0x85,zp.cactusX);
 
-  // Scroll background a bit
-  emit(0xE6,zp.scrollX);
+// --- Correct scroll setup ---
+emit(0xA5,zp.scrollX); emit(0x8D,0x05,0x20); // $2005 horizontal = scrollX
+emit(0xA9,0x00);       emit(0x8D,0x05,0x20); // $2005 vertical = 0
 
   // Collision: if |cactusX - dinoX| < 12 and dinoY > 144 → gameOver=1
   // dx = cactusX - dinoX (unsigned)
