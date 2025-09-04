@@ -318,7 +318,7 @@ emit(0xA9,0x00);       emit(0x8D,0x05,0x20); // $2005 vertical = 0
   emit(0xA5,zp.cactusX); emit(0x8D,(OAM+19)&0xFF,(OAM+19)>>8);
   emit(0xA5,zp.cactusX); emit(0x8D,(OAM+23)&0xFF,(OAM+23)>>8);
   emit(0x60); // RTS
-
+const GROUND_Y = 0xD0; // about pixel row 208
   // drawGameOver: write "GAME OVER" to center-ish using background tiles (8..)
   label("drawGameOver");
   // PPUADDR to row 13 col 11: addr = $2000 + 13*32 + 11 = $2000 + 427 = $21AB
