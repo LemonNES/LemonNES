@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NES ROM with Text</title>
+</head>
+<body>
+  <h1>NES ROM Generator</h1>
+  <button id="build">Build hello-text.nes</button>
+
+  <script>
+  function buildNES() {
+    // --- iNES header ---
+    const header = new Uint8Array([
+      0x4E,0x45,0x53,0x1A, // "NES"
+      0x01, // 1x16KB PRG
+      0x01, // 1x8KB CHR
+      0x00,0x00, // flags
+      0,0,0,0,0,0,0,0 // padding
+    ]);
+
+    // --- PRG ROM (16KB) ---
+    const prg = new Uint8Array(0x4000);
+
+    let i = 0;
+    function emit(...bytes){ for (let b of bytes) prg[i++] = b; }
+
+    // Reset vector entry ($8000)
+    // Disable interrupts
+    emit(0x78);              // SEI
+    emit(0xD8);              // CLD
+    emit(0xA2,0x40);         // LDX #$40 (stack ptr)
+    emit(0x9A);              // TXS
+
+    // Wait for vblank (poll PPU status bit 7)
+    emit(0xAD,0x02,0x20);    // LDA $2002
+    emit(0x10,0xFB);         // BPL -5
+
+    // Write "HELLO" into $2000 nametable
+    // Set PPUADDR = $2000
+    emit(0xA9,0x20); emit(0x8D,0x06,0x20); // LDA #$20 / STA $2006
+    emit(0xA9,0x00); emit(0x8D,0x06,0x20); // LDA #$00 / STA $2006
+
+    // Data: H=1, E=2, L=3, L=3, O=4
+    emit(0xA9,0x01); emit(0x8D,0x07,0x20); // STA $2007
+    emit(0xA9,0x02); emit(0x8D,0x07,0x20);
+    emit(0xA9,0x03); emit(0x8D,0x07,0x20);
+    emit(0xA9,0x03); emit(0x8D,0x07,0x20);
+    emit(0xA9,0x04); emit(0x8D,0x07,0x20);
+
+    // Enable background rendering
+    emit(0xA9,0x08); emit(0x8D,0x00,0x20); // LDA #$08 / STA $2000
+    emit(0xA9,0x1E); emit(0x8D,0x01,0x20); // LDA #$1E / STA $2001
+
+    // Infinite loop
+    emit(0x4C, i&0xFF, (0x80 + (i>>8))&0xFF); // JMP current addr
+
+    // Vectors at end
+    prg[0x3FFA] = 0x00; prg[0x3FFB] = 0x80; // NMI
+    prg[0x3FFC] = 0x00; prg[0x3FFD] = 0x80; // Reset
+    prg[0x3FFE] = 0x00; prg[0x3FFF] = 0x80; // IRQ
+
+    // --- CHR ROM (font, 8KB) ---
+    const chr = new Uint8Array(0x2000);
+
+    // Simple 8x8 patterns for H, E, L, O
+    function setTile(tileIndex, pattern){
+      let base = tileIndex*16;
+      for (let y=0;y<8;y++){
+        let row = pattern[y];
+        // plane 0 (bit0), plane1 (bit1) both same → white pixels
+        let lo=0,hi=0;
+        for (let x=0;x<8;x++){
+          if ((row>> (7-x)) & 1) lo |= (1<<(7-x));
+        }
+        chr[base+y] = lo;
+      }
+    }
+
+    // crude 8x8 letters
+    setTile(1,[0b10010010,
+               0b10010010,
+               0b11111110,
+               0b10010010,
+               0b10010010,
+               0b10010010,
+               0b00000000,
+               0b00000000]); // H
+
+    setTile(2,[0b11111110,
+               0b10000000,
+               0b11111000,
+               0b10000000,
+               0b11111110,
+               0b00000000,
+               0b00000000,
+               0b00000000]); // E
+
+    setTile(3,[0b10000000,
+               0b10000000,
+               0b10000000,
+               0b10000000,
+               0b11111110,
+               0b00000000,
+               0b00000000,
+               0b00000000]); // L
+
+    setTile(4,[0b01111100,
+               0b10000010,
+               0b10000010,
+               0b10000010,
+               0b01111100,
+               0b00000000,
+               0b00000000,
+               0b00000000]); // O
+
+    // --- Build final ROM ---
+    const rom = new Uint8Array(header.length + prg.length + chr.length);
+    rom.set(header,0);
+    rom.set(prg,header.length);
+    rom.set(chr,header.length+prg.length);
+
+    // --- Download ---
+    const blob = new Blob([rom], {type:"application/octet-stream"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href=url;
+    a.download="hello-text.nes";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  document.getElementById("build").addEventListener("click", buildNES);
+  </script>
+</body>
+</html>
