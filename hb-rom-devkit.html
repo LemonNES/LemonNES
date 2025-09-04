@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>NES Homebrew IDE</title>
+  <style>
+    body { font-family: monospace; padding: 20px; display: flex; gap: 20px; }
+    textarea { width: 400px; height: 400px; font-family: monospace; }
+    canvas { border: 1px solid black; image-rendering: pixelated; margin-bottom: 10px; }
+    .tile-container { display: flex; flex-wrap: wrap; gap: 5px; width: 272px; } /* 16x16 tiles display */
+    .tile-wrapper { display: flex; flex-direction: column; align-items: center; }
+    button { margin: 5px 0; padding: 5px 10px; }
+  </style>
+</head>
+<body>
+  <!-- Left side: Assembly editor -->
+  <div>
+    <h3>6502 Assembly Code</h3>
+    <textarea id="asmCode">
+LDA #$3F
+STA $2001
+JMP $8000
+    </textarea>
+    <button id="compileDownload">Compile & Download NES ROM</button>
+  </div>
+
+  <!-- Right side: CHR editor -->
+  <div>
+    <h3>CHR Tile Editor (16 tiles max)</h3>
+    <div class="tile-container" id="tileContainer"></div>
+    <button id="addTile">Add Tile</button>
+  </div>
+
+<script>
+/* ---------------------------
+      PRG-ROM Assembler
+--------------------------- */
+const opcodeMap = {
+  'LDA #': 0xA9, 'LDX #': 0xA2, 'LDY #': 0xA0,
+  'STA ': 0x8D, 'STX ': 0x8E, 'STY ': 0x8C,
+  'ADC ': 0x6D, 'SBC ': 0xED, 'INC ': 0xEE, 'DEC ': 0xCE,
+  'JMP ': 0x4C, 'BEQ ': 0xF0, 'BNE ': 0xD0,
+  'TSX': 0xBA, 'TXS': 0x9A, 'PHA': 0x48, 'PLA': 0x68, 'NOP': 0xEA
+};
+
+// Convert hex string like "$2000" -> number
+function parseHex(str){ return parseInt(str.replace('$',''),16); }
+
+// Simple assembler
+function assemble(code){
+  const lines = code.split('\n');
+  const bytes = [];
+  for(let line of lines){
+    line = line.trim(); if(!line) continue;
+    let matched = false;
+    for(let key in opcodeMap){
+      if(line.startsWith(key)){
+        bytes.push(opcodeMap[key]);
+        let operand = line.slice(key.length).trim();
+        if(operand.startsWith('#')){
+          bytes.push(parseHex(operand));
+        } else if(operand){
+          let addr = parseHex(operand);
+          bytes.push(addr & 0xFF, (addr>>8)&0xFF);
+        }
+        matched = true; break;
+      }
+    }
+    if(!matched) console.warn('Unknown instruction:', line);
+  }
+  return new Uint8Array(bytes);
+}
+
+/* ---------------------------
+      NES ROM Builder
+--------------------------- */
+function buildNES(prgROM, chrROM){
+  const header = new Uint8Array([
+    0x4E,0x45,0x53,0x1A, // NES<EOF>
+    1, // 1x16KB PRG-ROM
+    chrROM ? chrROM.length/8192 : 0, // CHR-ROM banks of 8KB
+    0,0,0,0,0,0,0,0,0,0
+  ]);
+  const rom = new Uint8Array(header.length + prgROM.length + (chrROM? chrROM.length:0));
+  rom.set(header,0);
+  rom.set(prgROM,header.length);
+  if(chrROM) rom.set(chrROM,header.length + prgROM.length);
+  return rom;
+}
+
+function downloadROM(rom, filename='homebrew.nes'){
+  const blob = new Blob([rom], {type:'application/octet-stream'});
+  const url = URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=filename;
+  a.click();
+}
+
+/* ---------------------------
+      CHR Tile Editor
+--------------------------- */
+const tileContainer = document.getElementById('tileContainer');
+const maxTiles = 16;
+const tileSize = 8;
+const displayScale = 4;
+let tiles = []; // Array of pixel arrays (8x8, values 0-3)
+
+function createTileCanvas(tilePixels){
+  const wrapper = document.createElement('div'); wrapper.className='tile-wrapper';
+  const canvas = document.createElement('canvas');
+  canvas.width=tileSize; canvas.height=tileSize;
+  canvas.style.width = (tileSize*displayScale)+'px';
+  canvas.style.height = (tileSize*displayScale)+'px';
+  wrapper.appendChild(canvas);
+  const colors = ['#000','#555','#AAA','#FFF'];
+
+  function drawTile(){
+    const ctx = canvas.getContext('2d');
+    for(let y=0;y<tileSize;y++){
+      for(let x=0;x<tileSize;x++){
+        ctx.fillStyle = colors[tilePixels[y*tileSize+x]];
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  drawTile();
+
+  canvas.addEventListener('click',e=>{
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX-rect.left)/displayScale);
+    const y = Math.floor((e.clientY-rect.top)/displayScale);
+    const idx = y*tileSize+x;
+    tilePixels[idx] = (tilePixels[idx]+1)%4;
+    drawTile();
+  });
+
+  tiles.push(tilePixels);
+  tileContainer.appendChild(wrapper);
+}
+
+// Convert tile pixels array (8x8) to CHR 2bpp bytes
+function pixelsToCHR(tilePixels){
+  const chr = new Uint8Array(16);
+  for(let y=0;y<8;y++){
+    let plane0=0, plane1=0;
+    for(let x=0;x<8;x++){
+      const color = tilePixels[y*8+x];
+      plane0 |= (color&1)<<(7-x);
+      plane1 |= ((color>>1)&1)<<(7-x);
+    }
+    chr[y] = plane0; chr[y+8]=plane1;
+  }
+  return chr;
+}
+
+function getAllCHRROM(){
+  const allBytes = [];
+  for(let t of tiles){
+    allBytes.push(...pixelsToCHR(t));
+  }
+  return new Uint8Array(allBytes);
+}
+
+document.getElementById('addTile').onclick=()=>{
+  if(tiles.length>=maxTiles){ alert('Max tiles reached'); return; }
+  const newTile = Array(64).fill(0);
+  createTileCanvas(newTile);
+};
+
+/* ---------------------------
+      Compile & Download
+--------------------------- */
+document.getElementById('compileDownload').onclick=()=>{
+  const prgROM = assemble(document.getElementById('asmCode').value);
+  const chrROM = tiles.length>0 ? getAllCHRROM() : null;
+  const nesROM = buildNES(prgROM, chrROM);
+  downloadROM(nesROM);
+};
+
+// Initialize with one tile
+createTileCanvas(Array(64).fill(0));
+</script>
+</body>
+</html>
