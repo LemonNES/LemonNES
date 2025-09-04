@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NES Homebrew IDE</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        textarea { width: 100%; height: 200px; font-family: monospace; }
+        button { margin-top: 10px; padding: 10px; }
+    </style>
+</head>
+<body>
+<h2>NES Homebrew IDE (Minimal)</h2>
+<p>Type assembly commands below (limited subset):</p>
+<textarea id="asmCode">LDA #$00
+STA $2000
+JMP $8000</textarea>
+<br>
+<button id="compileDownload">Compile & Download NES ROM</button>
+
+<script>
+// Minimal mapping: instruction -> opcode
+const opcodeMap = {
+    'LDA #': 0xA9, // LDA immediate
+    'STA ': 0x8D,  // STA absolute
+    'JMP ': 0x4C   // JMP absolute
+};
+
+// Convert hex string like "$2000" -> number
+function parseHex(str) {
+    return parseInt(str.replace('$',''), 16);
+}
+
+// Simple assembler for our tiny subset
+function assemble(code) {
+    const lines = code.split('\n');
+    const bytes = [];
+    for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
+        for (let key in opcodeMap) {
+            if (line.startsWith(key)) {
+                bytes.push(opcodeMap[key]);
+                let operand = line.slice(key.length).trim();
+                if (operand.startsWith('#')) {
+                    // Immediate byte
+                    bytes.push(parseHex(operand));
+                } else {
+                    // Absolute address (little endian)
+                    let addr = parseHex(operand);
+                    bytes.push(addr & 0xFF);
+                    bytes.push((addr >> 8) & 0xFF);
+                }
+                break;
+            }
+        }
+    }
+    return new Uint8Array(bytes);
+}
+
+// Build NES ROM
+function buildNES(prgROM) {
+    const header = new Uint8Array([
+        0x4E, 0x45, 0x53, 0x1A, // NES<EOF>
+        1, // 1 x 16KB PRG-ROM
+        0, // 0 x 8KB CHR-ROM
+        0,0,0,0,0,0,0,0,0,0
+    ]);
+    const rom = new Uint8Array(header.length + prgROM.length);
+    rom.set(header, 0);
+    rom.set(prgROM, header.length);
+    return rom;
+}
+
+// Download ROM
+function downloadROM(rom, filename='homebrew.nes') {
+    const blob = new Blob([rom], {type: 'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+}
+
+// Button click
+document.getElementById('compileDownload').onclick = function() {
+    const asmCode = document.getElementById('asmCode').value;
+    const prgROM = assemble(asmCode);
+    const nesROM = buildNES(prgROM);
+    downloadROM(nesROM);
+};
+</script>
+</body>
+</html>
