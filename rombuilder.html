@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NES Homebrew ROM Builder</title>
+  <style>
+    /* Theme variables */
+    :root {
+      --bg-gradient: linear-gradient(135deg, #eceff1, #f5f7fa);
+      --card-bg: #fff;
+      --text-main: #333;
+      --text-sub: #666;
+      --button-bg: #0078d7;
+      --button-bg-hover: #005fa3;
+      --file-bg: #e0e0e0;
+      --file-bg-hover: #d5d5d5;
+      --shadow: rgba(0, 0, 0, 0.1);
+    }
+
+    body.dark {
+      --bg-gradient: linear-gradient(135deg, #1e1e1e, #2a2a2a);
+      --card-bg: #2c2c2c;
+      --text-main: #f5f5f5;
+      --text-sub: #bbbbbb;
+      --button-bg: #4a90e2;
+      --button-bg-hover: #357abf;
+      --file-bg: #3a3a3a;
+      --file-bg-hover: #4a4a4a;
+      --shadow: rgba(0, 0, 0, 0.5);
+    }
+
+    body {
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: var(--bg-gradient);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      transition: background 0.3s ease;
+    }
+
+    /* Card container */
+    .container {
+      background: var(--card-bg);
+      padding: 2.5em;
+      border-radius: 16px;
+      box-shadow: 0 8px 20px var(--shadow);
+      max-width: 480px;
+      width: 90%;
+      text-align: center;
+      transition: background 0.3s ease, color 0.3s ease;
+    }
+
+    h1 {
+      font-size: 1.8em;
+      margin-bottom: 0.5em;
+      color: var(--text-main);
+    }
+
+    p {
+      font-size: 0.95em;
+      color: var(--text-sub);
+      margin-bottom: 1.5em;
+      line-height: 1.4;
+    }
+
+    /* File input styling */
+    input[type="file"] {
+      display: none;
+    }
+
+    .file-label {
+      display: inline-block;
+      padding: 0.75em 1.5em;
+      border-radius: 8px;
+      background: var(--file-bg);
+      color: var(--text-main);
+      cursor: pointer;
+      font-size: 0.95em;
+      margin-bottom: 1em;
+      transition: all 0.2s ease;
+    }
+
+    .file-label:hover {
+      background: var(--file-bg-hover);
+    }
+
+    /* Button styling */
+    button {
+      padding: 0.75em 2em;
+      border: none;
+      border-radius: 8px;
+      background: var(--button-bg);
+      color: white;
+      font-size: 1em;
+      cursor: pointer;
+      transition: background 0.2s ease, transform 0.1s ease;
+    }
+
+    button:hover {
+      background: var(--button-bg-hover);
+    }
+
+    button:active {
+      transform: scale(0.97);
+    }
+
+    /* Toggle button */
+    #themeToggle {
+      position: absolute;
+      top: 1em;
+      right: 1em;
+      background: none;
+      border: none;
+      font-size: 1.2em;
+      cursor: pointer;
+      color: var(--text-main);
+      transition: color 0.3s ease;
+    }
+
+    /* File name preview */
+    #fileName {
+      margin-top: 0.5em;
+      font-size: 0.9em;
+      color: var(--text-main);
+      word-wrap: break-word;
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 600px) {
+      .container {
+        padding: 1.5em;
+        border-radius: 12px;
+      }
+      h1 {
+        font-size: 1.4em;
+      }
+      p {
+        font-size: 0.9em;
+      }
+      .file-label,
+      button {
+        width: 100%;
+        padding: 0.9em;
+        font-size: 1em;
+      }
+      #fileName {
+        font-size: 0.85em;
+      }
+    }
+
+    @media (max-width: 400px) {
+      h1 {
+        font-size: 1.2em;
+      }
+      p {
+        font-size: 0.85em;
+      }
+    }
+  </style>
+</head>
+<body>
+  <button id="themeToggle">🌙</button>
+
+  <div class="container">
+    <h1>🕹️ NES ROM Builder</h1>
+    <p>Upload a <strong>.txt</strong> file with PRG-ROM hex followed by <code>--CHR--</code> and CHR-ROM hex.</p>
+    <p class="description">
+      This tool converts a formatted text file into a valid 
+      ROM. The text file must contain PRG-ROM hex data, 
+      followed by CHR then CHR-ROM hex data. Once uploaded, 
+      the tool builds an iNES header, pads the data to the correct sizes, and 
+      generates a playable NES ROM you can download and run in an emulator.
+    </p>
+
+    <label for="fileInput" class="file-label">Choose File</label>
+    <input type="file" id="fileInput" accept=".txt">
+    <div id="fileName">No file selected</div>
+
+    <button onclick="convertToNES()">Convert & Download</button>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const fileName = document.getElementById('fileName');
+    const themeToggle = document.getElementById('themeToggle');
+
+    // Set initial theme based on system preference
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      document.body.classList.add('dark');
+      themeToggle.textContent = "☀️";
+    }
+
+    // Update icon if system theme changes
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+      if (!document.body.classList.contains('manual-theme')) {
+        if (e.matches) {
+          document.body.classList.add('dark');
+          themeToggle.textContent = "☀️";
+        } else {
+          document.body.classList.remove('dark');
+          themeToggle.textContent = "🌙";
+        }
+      }
+    });
+
+    // Toggle button manual override
+    themeToggle.addEventListener('click', () => {
+      document.body.classList.toggle('dark');
+      document.body.classList.add('manual-theme'); // mark as manual override
+      themeToggle.textContent = document.body.classList.contains('dark') ? "☀️" : "🌙";
+    });
+
+    // File name preview
+    fileInput.addEventListener('change', () => {
+      fileName.textContent = fileInput.files[0] ? fileInput.files[0].name : "No file selected";
+    });
+
+    // NES conversion logic
+    function convertToNES() {
+      const file = fileInput.files[0];
+      if (!file) {
+        alert("Please select a .txt file first.");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = e.target.result.trim();
+        const sections = text.split('--CHR--');
+        if (sections.length !== 2) {
+          alert("File must contain '--CHR--' to separate PRG and CHR data.");
+          return;
+        }
+
+        const prgHex = sections[0].trim().split(/\s+/).map(h => parseInt(h, 16));
+        const chrHex = sections[1].trim().split(/\s+/).map(h => parseInt(h, 16));
+
+        const prgSize = 16384; // 16KB PRG-ROM
+        const chrSize = 8192;  // 8KB CHR-ROM
+
+        // iNES header
+        const header = [
+          0x4E, 0x45, 0x53, 0x1A,
+          0x01, // 1 x 16KB PRG-ROM
+          0x01, // 1 x 8KB CHR-ROM
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        ];
+
+        const prgROM = new Uint8Array(prgSize);
+        prgROM.set(prgHex.slice(0, prgSize));
+
+        const chrROM = new Uint8Array(chrSize);
+        chrROM.set(chrHex.slice(0, chrSize));
+
+        const fullROM = new Uint8Array(header.length + prgSize + chrSize);
+        fullROM.set(header, 0);
+        fullROM.set(prgROM, header.length);
+        fullROM.set(chrROM, header.length + prgSize);
+
+        const baseName = file.name.replace(/\.[^/.]+$/, "");
+        const downloadName = baseName + ".nes";
+
+        const blob = new Blob([fullROM], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = downloadName;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      reader.readAsText(file);
+    }
+  </script>
+</body>
+</html>
