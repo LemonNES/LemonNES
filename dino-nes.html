@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>NES Dino – ROM Generator</title>
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;padding:24px}
+    button{font-size:16px;padding:10px 16px}
+    small{color:#666}
+  </style>
+</head>
+<body>
+  <h1>NES Dino – ROM Generator</h1>
+  <p>Endless runner (jump over the cactus). Controls: <b>A / B / Up</b> to jump. </p>
+  <button id="build">Build dino.nes</button>
+  <p><small>Tested in Mesen & FCEUX. Mapper 0 (NROM-128), CHR-ROM. Very small demo.</small></p>
+
+<script>
+function buildNES(){
+  // Helpers to write bytes/words into PRG
+  const header = new Uint8Array([
+    0x4E,0x45,0x53,0x1A, // "NES"^Z
+    0x01, // 1 x 16KB PRG
+    0x01, // 1 x 8KB CHR
+    0x00, // flags6 (horizontal mirroring default)
+    0x00, // flags7
+    0,0,0,0,0,0,0,0
+  ]);
+
+  const prg = new Uint8Array(0x4000); // 16KB PRG
+  let pc = 0; // offset into PRG ($8000 base)
+  const org = 0x8000;
+  const labels = {};
+  const fixups = [];
+
+  const emit = (...b)=>{ for(const x of b) prg[pc++] = x&0xFF; };
+  const emitWord = w => { emit(w & 0xFF, (w>>8)&0xFF); };
+  const here = ()=> org+pc;
+
+  const label = (name)=>{ labels[name]=here(); };
+  const JSR = (t)=>{ emit(0x20); // JSR abs
+    if(typeof t==="number"){ emitWord(t); }
+    else { fixups.push([pc, t]); emitWord(0); }
+  };
+  const JMP = (t)=>{ emit(0x4C); if(typeof t==="number"){ emitWord(t); } else { fixups.push([pc, t]); emitWord(0); } };
+  const BNE = (rel)=>emit(0xD0, rel&0xFF);
+  const BEQ = (rel)=>emit(0xF0, rel&0xFF);
+  const BMI = (rel)=>emit(0x30, rel&0xFF);
+  const BPL = (rel)=>emit(0x10, rel&0xFF);
+  const BCC = (rel)=>emit(0x90, rel&0xFF);
+  const BCS = (rel)=>emit(0xB0, rel&0xFF);
+  const branchTo = (targetAbs)=>{
+    // compute relative from next byte (PC already at opcode+1)
+    const rel = (targetAbs - (org+pc+1));
+    return rel & 0xFF;
+  };
+
+  // --- Zero page variables (addresses are hardcoded) ---
+  const zp = {
+    frameLo: 0x00, frameHi: 0x01, nmiFlag: 0x02,
+    dinoY: 0x03, dV: 0x04, dinoX: 0x05,
+    cactusX: 0x06, gameOver: 0x07, input: 0x08, onGround: 0x09,
+    scrollX: 0x0A
+  };
+
+  // Small constants
+  const OAM = 0x0200; // 256-byte OAM shadow in RAM
+  const APU_FRAMEIRQ_DISABLE = 0x40;
+
+  // ---------------- Code starts ----------------
+  label("RESET");
+  emit(0x78);             // SEI
+  emit(0xD8);             // CLD
+  emit(0xA2,0x40); emit(0x9A); // LDX #$40 ; TXS (stack)
+  // Disable APU frame IRQ
+  emit(0xA9,APU_FRAMEIRQ_DISABLE); emit(0x8D,0x17,0x40); // LDA #$40 ; STA $4017
+
+  // Turn off PPU while initializing
+  emit(0xA9,0x00); emit(0x8D,0x00,0x20); // $2000
+  emit(0xA9,0x00); emit(0x8D,0x01,0x20); // $2001
+
+  // Wait for two vblanks (PPU warmup)
+  JSR("waitVBlank");
+  JSR("waitVBlank");
+
+  // Load palettes
+  JSR("loadPalettes");
+
+  // Clear nametables and attribute tables
+  JSR("clearNametables");
+
+  // Draw a simple ground pattern on bottom row ($23C0 attrs default)
+  JSR("drawGround");
+
+  // Init variables
+  // dinoX=56, dinoY=160 (screen Y in sprite space), dV=0, cactusX=240, scrollX=0
+  emit(0xA9,56); emit(0x85,zp.dinoX);
+  emit(0xA9,160); emit(0x85,zp.dinoY);
+  emit(0xA9,0x00); emit(0x85,zp.dV);
+  emit(0xA9,240); emit(0x85,zp.cactusX);
+  emit(0xA9,0x00); emit(0x85,zp.scrollX);
+  emit(0xA9,0x00); emit(0x85,zp.gameOver);
+  emit(0xA9,0x01); emit(0x85,zp.onGround); // start on ground
+
+  // Build initial OAM (dino 2x2 + cactus 1x2)
+  JSR("buildOAM");
+
+  // Enable NMI, BG+Sprites on
+  emit(0xA9,0x88); emit(0x8D,0x00,0x20); // $2000: NMI on, sprites from $0000, BG from $0000
+  emit(0xA9,0x1E); emit(0x8D,0x01,0x20); // $2001: show bg+sprites
+
+  // Main loop: wait for NMI, run logic, update OAM/scroll, repeat
+  label("main");
+  // wait nmiFlag=1
+  label("waitFrame");
+  emit(0xA5,zp.nmiFlag); emit(0xF0,0xFB); // BEQ waitFrame (rel back -5)
+  // clear flag
+  emit(0xA9,0x00); emit(0x85,zp.nmiFlag);
+
+  // -- Read controller (A/B/Up jump) --
+  JSR("readInput");
+
+  // If gameOver != 0, spin at game over loop
+  emit(0xA5,zp.gameOver); BEQ(0x05); // if zero, skip JMP
+  JMP("gameOverLoop");
+
+  // Jump if (A|B|Up) pressed and onGround=1
+  emit(0xA5,zp.onGround); BEQ(0x0C); // if not on ground, skip jump
+  emit(0xA5,zp.input); emit(0x29,0b00000111); // mask A,B,Up into bits 0..2
+  BEQ(0x06); // none pressed -> skip
+  // dV = -6 (0xFA)
+  emit(0xA9,0xFA); emit(0x85,zp.dV);
+  // onGround=0
+  emit(0xA9,0x00); emit(0x85,zp.onGround);
+
+  // Apply gravity: dV += 1 (wrap works)
+  emit(0xE6,zp.dV); // INC dV
+
+  // dinoY += dV
+  emit(0x18);                     // CLC
+  emit(0xA5,zp.dinoY);            // A = dinoY
+  emit(0x65,zp.dV);               // ADC dV (two's complement)
+  emit(0x85,zp.dinoY);
+
+  // Clamp to ground (>=160) → set onGround=1,dinoY=160,dV=0
+  emit(0xA5,zp.dinoY); emit(0xC9,160); BCC(0x0B); // if dinoY < 160, skip clamp
+  emit(0xA9,160); emit(0x85,zp.dinoY);
+  emit(0xA9,0x00); emit(0x85,zp.dV);
+  emit(0xA9,0x01); emit(0x85,zp.onGround);
+
+  // Move cactus left: cactusX--
+  emit(0xC6,zp.cactusX);
+  // If cactusX underflow past 0xFF & < 8, reset to 240
+  emit(0xA5,zp.cactusX); emit(0xC9,0x08); BCS(0x06); // if >=8, skip reset
+  emit(0xA9,240); emit(0x85,zp.cactusX);
+
+  // Scroll background a bit
+  emit(0xE6,zp.scrollX);
+
+  // Collision: if |cactusX - dinoX| < 12 and dinoY > 144 → gameOver=1
+  // dx = cactusX - dinoX (unsigned)
+  emit(0xA5,zp.cactusX); emit(0x38); emit(0xE5,zp.dinoX); // A = cactusX - dinoX
+  // make absolute by (A ^ 0x80) then compare to (12 ^ 0x80)
+  emit(0x49,0x80); emit(0xC9,0x80 ^ 12); BCS(0x0A); // if >= 12, skip vertical check
+  // vertical: dinoY > 144?
+  emit(0xA5,zp.dinoY); emit(0xC9,145); BCC(0x05); // if <=144 skip hit
+  emit(0xA9,0x01); emit(0x85,zp.gameOver); // set gameOver
+
+  // Update OAM from variables
+  JSR("updateOAM");
+
+  // Loop
+  JMP("main");
+
+  // --- Game Over loop (show text) ---
+  label("gameOverLoop");
+  // Write "GAME OVER" to middle of screen once, then idle
+  JSR("drawGameOver");
+  label("gameOverSpin");
+  JMP("gameOverSpin");
+
+  // --------- Subroutines ----------
+  // waitVBlank: poll $2002 bit7 set
+  label("waitVBlank");
+  emit(0xAD,0x02,0x20); BPL(0xFB); // BPL -5
+  emit(0x60); // RTS
+
+  // loadPalettes: BG + Sprite palettes
+  label("loadPalettes");
+  // PPUADDR = $3F00
+  emit(0xA9,0x3F); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x06,0x20);
+  // Background palette 0: universal + 3 grays
+  // Sprites: dino gray, cactus green, text white
+  const pals = [
+    0x0F,0x00,0x10,0x20,  // BG0
+    0x0F,0x00,0x10,0x20,  // BG1
+    0x0F,0x00,0x10,0x20,  // BG2
+    0x0F,0x00,0x10,0x20,  // BG3
+    0x0F,0x21,0x11,0x31,  // SPR0 (dino, grayish)
+    0x0F,0x29,0x19,0x39,  // SPR1 (cactus, greenish)
+    0x0F,0x30,0x10,0x00,  // SPR2 (unused)
+    0x0F,0x30,0x10,0x00   // SPR3 (unused)
+  ];
+  for (const p of pals){ emit(0xA9,p); emit(0x8D,0x07,0x20); }
+  emit(0x60); // RTS
+
+  // clearNametables: fill $2000-$23BF with 0, also $2400-$27BF
+  label("clearNametables");
+  // $2006=$20 00, write 0 x (0x400 bytes across two NTs is 2x 960 chars + attrs later)
+  // Clear first name table (960 chars)
+  emit(0xA9,0x20); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x06,0x20);
+  emit(0xA2,0x00); emit(0xA0,0x03); // 0x03C0 = 960
+  label("clr1");
+  emit(0xA9,0x00); emit(0x8D,0x07,0x20);
+  emit(0xCA); emit(0xD0,0xF9); // dec loop X 256
+  emit(0x88); emit(0xD0,0xF5); // dec Y 4 times => 1024 approx, slightly over; it's fine for demo
+
+  // Clear second name table quickly: set address $24 00 then do same
+  emit(0xA9,0x24); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x06,0x20);
+  emit(0xA2,0x00); emit(0xA0,0x03);
+  label("clr2");
+  emit(0xA9,0x00); emit(0x8D,0x07,0x20);
+  emit(0xCA); emit(0xD0,0xF9);
+  emit(0x88); emit(0xD0,0xF5);
+  emit(0x60); // RTS
+
+  // drawGround: write tile #5 across bottom row of first nametable
+  label("drawGround");
+  // Set address to row 29 (y=29)*32 = 928 -> $2000 + 928 = $23A0
+  emit(0xA9,0x23); emit(0x8D,0x06,0x20);
+  emit(0xA9,0xA0); emit(0x8D,0x06,0x20);
+  emit(0xA2,32); // 32 tiles
+  label("groundRow");
+  emit(0xA9,0x05); emit(0x8D,0x07,0x20);
+  emit(0xCA); BNE(0xF8);
+  emit(0x60); // RTS
+
+  // readInput: strobe $4016, read 8 bits, keep A/B/Up in zp.input bits 0..2
+  label("readInput");
+  emit(0xA9,0x01); emit(0x8D,0x16,0x40); // strobe 1
+  emit(0xA9,0x00); emit(0x8D,0x16,0x40); // strobe 0
+  // read A, B, Select, Start, Up, Down, Left, Right
+  // We'll OR together A(0),B(1),Up(4) into zp.input bits 0..2
+  emit(0xA9,0x00); emit(0x85,zp.input);
+  // A
+  emit(0xAD,0x16,0x40); emit(0x29,1); BEQ(0x04); emit(0xA9,0x01); emit(0x05,zp.input); emit(0x85,zp.input);
+  // B
+  emit(0xAD,0x16,0x40); emit(0x29,1); BEQ(0x04); emit(0xA9,0x02); emit(0x05,zp.input); emit(0x85,zp.input);
+  // Select
+  emit(0xAD,0x16,0x40);
+  // Start
+  emit(0xAD,0x16,0x40);
+  // Up
+  emit(0xAD,0x16,0x40); emit(0x29,1); BEQ(0x04); emit(0xA9,0x04); emit(0x05,zp.input); emit(0x85,zp.input);
+  // Down
+  emit(0xAD,0x16,0x40);
+  // Left
+  emit(0xAD,0x16,0x40);
+  // Right
+  emit(0xAD,0x16,0x40);
+  emit(0x60); // RTS
+
+  // buildOAM: set up sprite templates in OAM buffer ($0200), positions from variables
+  label("buildOAM");
+  // Dino: 2x2 (tiles 0,1,2,3), palette 0, not flipped
+  // Read Y from zp.dinoY, X from zp.dinoX
+  // Top-left
+  emit(0xA5,zp.dinoY); emit(0x8D, OAM&0xFF, OAM>>8);       // Y
+  emit(0xA9,0x00); emit(0x8D,(OAM+1)&0xFF,(OAM+1)>>8);     // tile #
+  emit(0xA9,0x00); emit(0x8D,(OAM+2)&0xFF,(OAM+2)>>8);     // attr (pal 0)
+  emit(0xA5,zp.dinoX); emit(0x8D,(OAM+3)&0xFF,(OAM+3)>>8); // X
+  // Top-right
+  emit(0xA5,zp.dinoY); emit(0x8D,(OAM+4)&0xFF,(OAM+4)>>8);
+  emit(0xA9,0x01); emit(0x8D,(OAM+5)&0xFF,(OAM+5)>>8);
+  emit(0xA9,0x00); emit(0x8D,(OAM+6)&0xFF,(OAM+6)>>8);
+  emit(0xA5,zp.dinoX); emit(0x69,8); emit(0x8D,(OAM+7)&0xFF,(OAM+7)>>8);
+  // Bottom-left
+  emit(0xA5,zp.dinoY); emit(0x69,8); emit(0x8D,(OAM+8)&0xFF,(OAM+8)>>8);
+  emit(0xA9,0x02); emit(0x8D,(OAM+9)&0xFF,(OAM+9)>>8);
+  emit(0xA9,0x00); emit(0x8D,(OAM+10)&0xFF,(OAM+10)>>8);
+  emit(0xA5,zp.dinoX); emit(0x8D,(OAM+11)&0xFF,(OAM+11)>>8);
+  // Bottom-right
+  emit(0xA5,zp.dinoY); emit(0x69,8); emit(0x8D,(OAM+12)&0xFF,(OAM+12)>>8);
+  emit(0xA9,0x03); emit(0x8D,(OAM+13)&0xFF,(OAM+13)>>8);
+  emit(0xA9,0x00); emit(0x8D,(OAM+14)&0xFF,(OAM+14)>>8);
+  emit(0xA5,zp.dinoX); emit(0x69,8); emit(0x8D,(OAM+15)&0xFF,(OAM+15)>>8);
+
+  // Cactus: 1x2 (tiles 6,7), palette 1 (green)
+  // top
+  emit(0xA9,160); emit(0x8D,(OAM+16)&0xFF,(OAM+16)>>8); // Y
+  emit(0xA9,0x06); emit(0x8D,(OAM+17)&0xFF,(OAM+17)>>8);// tile
+  emit(0xA9,0x01); emit(0x8D,(OAM+18)&0xFF,(OAM+18)>>8);// attr pal1
+  emit(0xA5,zp.cactusX); emit(0x8D,(OAM+19)&0xFF,(OAM+19)>>8);// X
+  // bottom
+  emit(0xA9,168); emit(0x8D,(OAM+20)&0xFF,(OAM+20)>>8);
+  emit(0xA9,0x07); emit(0x8D,(OAM+21)&0xFF,(OAM+21)>>8);
+  emit(0xA9,0x01); emit(0x8D,(OAM+22)&0xFF,(OAM+22)>>8);
+  emit(0xA5,zp.cactusX); emit(0x8D,(OAM+23)&0xFF,(OAM+23)>>8);
+
+  emit(0x60); // RTS
+
+  // updateOAM: refresh Y/X from vars each frame
+  label("updateOAM");
+  // dino Y/X updates
+  emit(0xA5,zp.dinoY); emit(0x8D, OAM&0xFF, OAM>>8);
+  emit(0xA5,zp.dinoY); emit(0x8D,(OAM+4)&0xFF,(OAM+4)>>8);
+  emit(0xA5,zp.dinoY); emit(0x69,8); emit(0x8D,(OAM+8)&0xFF,(OAM+8)>>8);
+  emit(0xA5,zp.dinoY); emit(0x69,8); emit(0x8D,(OAM+12)&0xFF,(OAM+12)>>8);
+  emit(0xA5,zp.dinoX); emit(0x8D,(OAM+3)&0xFF,(OAM+3)>>8);
+  emit(0xA5,zp.dinoX); emit(0x69,8); emit(0x8D,(OAM+7)&0xFF,(OAM+7)>>8);
+  emit(0xA5,zp.dinoX); emit(0x8D,(OAM+11)&0xFF,(OAM+11)>>8);
+  emit(0xA5,zp.dinoX); emit(0x69,8); emit(0x8D,(OAM+15)&0xFF,(OAM+15)>>8);
+  // cactus X updates
+  emit(0xA5,zp.cactusX); emit(0x8D,(OAM+19)&0xFF,(OAM+19)>>8);
+  emit(0xA5,zp.cactusX); emit(0x8D,(OAM+23)&0xFF,(OAM+23)>>8);
+  emit(0x60); // RTS
+
+  // drawGameOver: write "GAME OVER" to center-ish using background tiles (8..)
+  label("drawGameOver");
+  // PPUADDR to row 13 col 11: addr = $2000 + 13*32 + 11 = $2000 + 427 = $21AB
+  emit(0xA9,0x21); emit(0x8D,0x06,0x20);
+  emit(0xA9,0xAB); emit(0x8D,0x06,0x20);
+  // tiles for "GAME OVER" using a tiny set we place in CHR (tile ids 8..)
+  const textTiles = [8,9,10,11,12, 0, 13,14,15,16];
+  for (const t of textTiles){ emit(0xA9,t); emit(0x8D,0x07,0x20); }
+  emit(0x60); // RTS
+
+  // ---------- NMI ----------
+  // NMI: set flag, do OAM DMA, set scroll from scrollX
+  label("NMI");
+  // set scroll each frame
+  emit(0xA9,0x00); emit(0x8D,0x05,0x20); // $2005 X=0 (first write)
+  emit(0xA5,zp.scrollX); emit(0x8D,0x05,0x20); // $2005 Y uses scrollX for simple parallax wobble
+  // OAM DMA from $0200
+  emit(0xA9,(OAM>>8)&0xFF); emit(0x8D,0x14,0x40); // $4014 = $02
+  // set nmiFlag=1
+  emit(0xA9,0x01); emit(0x85,zp.nmiFlag);
+  emit(0x40); // RTI
+
+  // ---------- IRQ/BRK (unused) ----------
+  label("IRQ");
+  emit(0x40); // RTI
+
+  // -------- Fixup labels for JSR/JMP --------
+  for (const [pos, name] of fixups){
+    const addr = labels[name];
+    prg[pos] = addr & 0xFF;
+    prg[pos+1] = (addr>>8)&0xFF;
+  }
+
+  // ----------------- Vectors -----------------
+  prg[0x3FFA] = labels["NMI"] & 0xFF;
+  prg[0x3FFB] = (labels["NMI"]>>8)&0xFF;
+  prg[0x3FFC] = labels["RESET"] & 0xFF;
+  prg[0x3FFD] = (labels["RESET"]>>8)&0xFF;
+  prg[0x3FFE] = labels["IRQ"] & 0xFF;
+  prg[0x3FFF] = (labels["IRQ"]>>8)&0xFF;
+
+  // ----------------- CHR ROM -----------------
+  // Build extremely tiny tiles:
+  // 0..3: dino 2x2, 5: ground, 6..7: cactus, 8..: G,A,M,E,space,O,V,E,R
+  const chr = new Uint8Array(0x2000);
+
+  function putTile(idx, rows){ // rows: 8 bytes (1bpp, we use plane 0 only)
+    const base = idx*16;
+    for(let y=0;y<8;y++){
+      const r = rows[y]||0;
+      chr[base + y] = r;       // low plane
+      chr[base + 8 + y] = 0x00;// high plane (same color for simplicity)
+    }
+  }
+
+  // Simple dino (blocky), 8x8s
+  putTile(0,[0x18,0x3C,0x7E,0x5A,0x7E,0x3C,0x24,0x24]); // head
+  putTile(1,[0x00,0x18,0x3C,0x3C,0x7E,0x7E,0x66,0x42]); // head R
+  putTile(2,[0x18,0x18,0x3C,0x7E,0x66,0x24,0x24,0x24]); // body
+  putTile(3,[0x00,0x18,0x3C,0x7E,0x7E,0x3C,0x24,0x24]); // body R
+
+  // Ground tile (dots)
+  putTile(5,[0x00,0x00,0x81,0x00,0x18,0x00,0x42,0x00]);
+
+  // Cactus (top, bottom)
+  putTile(6,[0x18,0x3C,0x7E,0x18,0x18,0x18,0x18,0x18]);
+  putTile(7,[0x18,0x18,0x18,0x7E,0x18,0x18,0x3C,0x18]);
+
+  // Text tiles: crude capitals "G A M E  (space) O V E R"
+  putTile(8 ,[0x7C,0x82,0x9E,0x92,0x92,0x82,0x7C,0x00]); // G
+  putTile(9 ,[0x10,0x28,0x44,0x82,0xFE,0x82,0x82,0x00]); // A
+  putTile(10,[0xFC,0x82,0x82,0xFC,0x82,0x82,0xFC,0x00]); // M
+  putTile(11,[0xFC,0x82,0x82,0xFC,0x80,0x80,0x80,0x00]); // E
+  putTile(12,[0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]); // space
+  putTile(13,[0x7C,0x82,0x82,0x82,0x82,0x82,0x7C,0x00]); // O
+  putTile(14,[0x82,0xC6,0xAA,0x92,0x82,0x82,0x82,0x00]); // V
+  putTile(15,[0xFC,0x82,0x82,0xFC,0x80,0x80,0x80,0x00]); // E
+  putTile(16,[0xFE,0x10,0x10,0x7C,0x10,0x10,0xFE,0x00]); // R
+
+  // --- Combine ROM ---
+  const rom = new Uint8Array(header.length + prg.length + chr.length);
+  rom.set(header,0);
+  rom.set(prg,header.length);
+  rom.set(chr,header.length+prg.length);
+
+  // Download
+  const blob = new Blob([rom], {type:"application/octet-stream"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "dino.nes";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById("build").addEventListener("click", buildNES);
+</script>
+</body>
+</html>
