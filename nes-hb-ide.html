@@ -16,13 +16,77 @@ STA $2000
 JMP $8000</textarea>
 <br>
 <button id="compileDownload">Compile & Download NES ROM</button>
+<canvas id="tileCanvas" width="64" height="64" style="border:1px solid black;"></canvas>
+<button id="exportCHR">Export CHR-ROM</button>
 
 <script>
+const canvas = document.getElementById('tileCanvas');
+const ctx = canvas.getContext('2d');
+const tileSize = 8;
+let pixels = Array(64).fill(0); // 8x8, 2-bit color 0-3
+const colors = ['#000','#555','#AAA','#FFF'];
+
+canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / (canvas.width / tileSize));
+    const y = Math.floor((e.clientY - rect.top) / (canvas.height / tileSize));
+    const idx = y * tileSize + x;
+    pixels[idx] = (pixels[idx] + 1) % 4; // cycle color
+    drawTile();
+});
+
+function drawTile() {
+    for (let y=0; y<tileSize; y++) {
+        for (let x=0; x<tileSize; x++) {
+            ctx.fillStyle = colors[pixels[y*tileSize+x]];
+            ctx.fillRect(x*8, y*8, 8, 8);
+        }
+    }
+}
+
+// Convert pixels to CHR-ROM bytes (2bpp)
+function pixelsToCHR() {
+    const chr = new Uint8Array(16); // 16 bytes per tile
+    for(let y=0; y<8; y++) {
+        let plane0 = 0, plane1 = 0;
+        for(let x=0; x<8; x++){
+            const color = pixels[y*8+x];
+            plane0 |= (color & 1) << (7-x);
+            plane1 |= ((color>>1) & 1) << (7-x);
+        }
+        chr[y] = plane0;
+        chr[y+8] = plane1;
+    }
+    return chr;
+}
+
+document.getElementById('exportCHR').onclick = () => {
+    const chrROM = pixelsToCHR();
+    console.log(chrROM);
+    alert('CHR-ROM bytes exported to console!');
+};
+
+drawTile();
 // Minimal mapping: instruction -> opcode
 const opcodeMap = {
-    'LDA #': 0xA9, // LDA immediate
-    'STA ': 0x8D,  // STA absolute
-    'JMP ': 0x4C   // JMP absolute
+    'LDA #': 0xA9,
+    'LDX #': 0xA2,
+    'LDY #': 0xA0,
+    'STA ': 0x8D,
+    'STX ': 0x8E,
+    'STY ': 0x8C,
+    'ADC ': 0x6D,
+    'SBC ': 0xED,
+    'INC ': 0xEE,
+    'DEC ': 0xCE,
+    'JMP ': 0x4C,
+    'BEQ ': 0xF0,
+    'BNE ': 0xD0,
+    'TSX': 0xBA,
+    'TXS': 0x9A,
+    'PHA': 0x48,
+    'PLA': 0x68,
+    'NOP': 0xEA
 };
 
 // Convert hex string like "$2000" -> number
