@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h2>Download Minimal NES ROM</h2>
+<button id="download">Download ROM</button>
+<script>
+document.getElementById('download').onclick = function() {
+    // iNES header (16 bytes)
+    const header = new Uint8Array([
+        0x4E, 0x45, 0x53, 0x1A, // NES<EOF>
+        1, // 1 x 16KB PRG-ROM
+        0, // 0 x 8KB CHR-ROM (we'll use CHR RAM)
+        0,0,0,0,0,0,0,0,0,0 // padding
+    ]);
+
+    // Minimal PRG-ROM bytes from assembler
+    const prgROM = new Uint8Array([
+        0x78, 0xD8, 0xA2, 0x40, 0x8E, 0x00, 0x20, 0xA9,
+        0x3F, 0x8D, 0x01, 0x20, 0x4C, 0x0C, 0x80
+    ]);
+
+    // Combine header + PRG-ROM
+    const rom = new Uint8Array(header.length + prgROM.length);
+    rom.set(header, 0);
+    rom.set(prgROM, header.length);
+
+    // Create Blob and download
+    const blob = new Blob([rom], {type: 'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'minimal.nes';
+    a.click();
+};
+</script>
+</body>
+</html>
