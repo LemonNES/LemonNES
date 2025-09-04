@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>NES Dino Sprite Display</title>
+</head>
+<body>
+<h2>Click to download NES ROM with visible dino sprite</h2>
+<button id="download">Download NES Dino</button>
+
+<script>
+document.getElementById('download').onclick = function() {
+
+    // --------------------
+    // iNES Header
+    // --------------------
+    const header = new Uint8Array([
+        0x4E,0x45,0x53,0x1A, // NES<EOF>
+        0x01, // 16KB PRG-ROM
+        0x01, // 8KB CHR-ROM
+        0,0,0,0,0,0,0,0,0,0
+    ]);
+
+    // --------------------
+    // CHR-ROM: single 8x8 dino tile
+    // --------------------
+    const chrROM = new Uint8Array(8192).fill(0);
+    // Simple dino tile pattern
+    chrROM.set([
+        0b00111100,0b01111110,0b11111111,0b11111111,
+        0b11111111,0b01111110,0b00111100,0b00011000,
+        0,0,0,0,0,0,0,0
+    ], 0);
+
+    // --------------------
+    // PRG-ROM: show sprite on screen
+    // --------------------
+    const prgROM = new Uint8Array(16*1024).fill(0);
+
+    const program = [
+        0x78,       // SEI
+        0xD8,       // CLD
+        0xA2,0x40,  // LDX #$40
+        0x8E,0x00,0x20, // STX $2000 (disable NMI)
+        0xA9,0x1F,  // LDA #$1F background color
+        0x8D,0x01,0x20, // STA $2001
+
+        // Infinite loop to write OAM (4 bytes = Y, tile, attr, X)
+        // Write to $2003/$2004 to display sprite
+        0xA9,0x40,  // LDA #$40 Y pos
+        0x8D,0x03,0x20, // STA $2003
+        0xA9,0x00,  // LDA #$00 tile #
+        0x8D,0x04,0x20, // STA $2004
+        0xA9,0x00,  // LDA #$00 attributes
+        0x8D,0x04,0x20, // STA $2004
+        0xA9,0x60,  // LDA #$60 X pos
+        0x8D,0x04,0x20, // STA $2004
+        0x4C,0x07,0x80  // JMP $8007 infinite loop
+    ];
+
+    prgROM.set(program,0);
+
+    // --------------------
+    // Combine ROM
+    // --------------------
+    const rom = new Uint8Array(header.length + prgROM.length + chrROM.length);
+    rom.set(header,0);
+    rom.set(prgROM,header.length);
+    rom.set(chrROM,header.length+prgROM.length);
+
+    // --------------------
+    // Download
+    // --------------------
+    const blob = new Blob([rom],{type:'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href = url;
+    a.download='nes_dino_sprite.nes';
+    a.click();
+};
+</script>
+</body>
+</html>
