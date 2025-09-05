@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>In-browser NES .asm → .nes Assembler</title>
+<style>
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial;background:#0b1020;color:#e6eef8;padding:18px}
+h1{margin:0 0 8px}
+textarea{width:100%;height:320px;font-family:monospace;margin-bottom:8px;background:#071020;color:#cfe7ff;padding:8px;border:1px solid #1b2b3b}
+.row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
+button{padding:8px 12px;border-radius:6px;border:0;background:#0f6;cursor:pointer}
+button.ghost{background:#1b2b3b;color:#cfe7ff;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+a[aria-disabled="true"]{pointer-events:none;opacity:0.5;}
+pre{background:#071020;padding:12px;border-radius:6px;overflow:auto;border:1px solid #112233;white-space:pre-wrap;}
+label{display:block;margin-bottom:6px}
+.small{font-size:0.9rem;color:#9fb6d9}
+input[type="number"]{width:120px;padding:6px}
+</style>
+</head>
+<body>
+<h1>NES .asm → .nes (in-browser)</h1>
+<div class="small">Paste 6502-style NES assembly, use <code>.org $8000</code> (default $8000), then Assemble → Download .nes</div>
+
+<label>Assembly source</label>
+<textarea id="asm" spellcheck="false">; Example: a tiny NES program (infinite loop)
+.org $8000
+start:  SEI
+        CLD
+        LDX #$FF
+        TXS
+loop:   NOP
+        JMP loop
+.org $FFFA
+.word 0 ; NMI vector
+.word 0 ; RESET vector (filled later)
+.word 0 ; IRQ/BRK vector
+</textarea>
+
+<div class="row">
+  <button id="assemble">Assemble & Build .nes</button>
+  <a class="ghost" id="download" aria-disabled="true">Download .nes</a>
+  <div style="display:flex;align-items:center;gap:8px">
+    <label class="small">PRG size (16KB banks):
+      <input type="number" id="prgBanks" min="1" value="1"/>
+    </label>
+  </div>
+</div>
+
+<label>Assembly log / errors</label>
+<pre id="log"></pre>
+
+<script>
+(function(){
+const txtIn = document.getElementById('asm');
+const log = document.getElementById('log');
+const assembleBtn = document.getElementById('assemble');
+const downloadBtn = document.getElementById('download');
+const prgBanksInput = document.getElementById('prgBanks');
+
+function hex(n,len=2){let s=(n>>>0).toString(16).toUpperCase(); while(s.length<len)s='0'+s; return '$'+s;}
+function parseNumber(tok){if(!tok)return null; tok=tok.trim(); if(tok.startsWith('$')) return parseInt(tok.slice(1),16); if(tok.startsWith('%')) return parseInt(tok.slice(1),2); if(tok.startsWith('0x')) return parseInt(tok.slice(2),16); if(/^[-+]?\d+$/.test(tok)) return parseInt(tok,10); return null;}
+function stripComments(line){let i=line.indexOf(';');if(i>=0)return line.slice(0,i);i=line.indexOf('//');if(i>=0)return line.slice(0,i);return line;}
+function parseOperandMode(op){
+  if(!op||op.trim()==='') return {mode:'impl',value:null};
+  op=op.trim();
+  if(/^A$/i.test(op)) return {mode:'acc',value:null};
+  if(op.startsWith('#')) return {mode:'imm',value:op.slice(1).trim()};
+  let m1=op.match(/^\(\s*([^)]+?)\s*,\s*[Xx]\s*\)$/); if(m1) return {mode:'indx',value:m1[1].trim()};
+  let m2=op.match(/^\(\s*([^)]+?)\s*\)\s*,\s*[Yy]$/); if(m2) return {mode:'indy',value:m2[1].trim()};
+  let m3=op.match(/^\(\s*([^)]+?)\s*\)$/); if(m3) return {mode:'ind',value:m3[1].trim()};
+  let m4=op.match(/^(.+?)\s*,\s*([XxYy])$/); if(m4){ let reg=m4[2].toUpperCase(); return {mode:reg==='X'?'absx':'absy',value:m4[1].trim()}; }
+  return {mode:'addr',value:op};
+}
+
+// Minimal opcode table
+const OPCODES={
+  'LDA':{imm:0xA9,zp:0xA5,zpx:0xB5,abs:0xAD,absx:0xBD,absy:0xB9,indx:0xA1,indy:0xB1},
+  'LDX':{imm:0xA2,zp:0xA6,zpy:0xB6,abs:0xAE,absy:0xBE},
+  'LDY':{imm:0xA0,zp:0xA4,zpx:0xB4,abs:0xAC,absx:0xBC},
+  'STA':{zp:0x85,zpx:0x95,abs:0x8D,absx:0x9D,absy:0x99,indx:0x81,indy:0x91},
+  'JMP':{abs:0x4C,ind:0x6C},'JSR':{abs:0x20},'RTS':{impl:0x60},'RTI':{impl:0x40},
+  'SEI':{impl:0x78},'CLD':{impl:0xD8},'TXS':{impl:0x9A},'NOP':{impl:0xEA},
+};
+
+function assemble(src,options){
+  const lines=src.split(/\r?\n/);
+  const cleanLines=lines.map((l,i)=>({orig:l,text:stripComments(l).trim(),lineno:i+1}));
+  let org=0x8000, pc=org, symbols={}, output=[], errors=[];
+  
+  for(let pass=1;pass<=2;pass++){
+    pc=org; output=[];
+    if(pass===2) log.textContent+='\n--- PASS 2 ---\n';
+    for(const ln of cleanLines){
+      let line=ln.text; if(line===''){ output.push({addr:pc,bytes:[],src:ln}); continue; }
+      if(/^[A-Za-z_][\w]*:$/.test(line)){ if(pass===1) symbols[line.replace(/:$/,'')]=pc; output.push({addr:pc,bytes:[],src:ln}); continue; }
+      if(/^[A-Za-z_][\w]*:\s+/.test(line)){ let m=line.match(/^([A-Za-z_][\w]*):\s*(.*)$/); if(m){ if(pass===1) symbols[m[1]]=pc; line=m[2]; } }
+      if(line.startsWith('.')){
+        let dir=line.split(/\s+/)[0].toLowerCase();
+        if(dir==='.org'){ let n=parseNumber(line.substring(dir.length).trim()); if(n!=null) org=pc=n; output.push({addr:pc,bytes:[],src:ln}); continue; }
+        if(dir==='.byte'||dir==='.db'){ let items=line.substring(dir.length).trim().split(',').map(s=>s.trim()).filter(Boolean); if(pass===1){pc+=items.length; output.push({addr:pc-items.length,bytes:[],src:ln}); continue;} let bytes=[]; for(const it of items){ let v=parseNumber(it); if(v==null){if(it in symbols)v=symbols[it];else{errors.push(`Line ${ln.lineno}: unknown symbol ${it}`);v=0;} } bytes.push(v&0xFF);} output.push({addr:pc,bytes:bytes,src:ln}); pc+=bytes.length; continue;}
+        if(dir==='.word'){ let items=line.substring(dir.length).trim().split(',').map(s=>s.trim()).filter(Boolean); if(pass===1){pc+=items.length*2; output.push({addr:pc-items.length*2,bytes:[],src:ln}); continue;} let bytes=[]; for(const it of items){ let v=parseNumber(it); if(v==null){ if(it in symbols)v=symbols[it]; else{errors.push(`Line ${ln.lineno}: unknown word ${it}`); v=0;} } bytes.push(v&0xFF); bytes.push((v>>8)&0xFF);} output.push({addr:pc,bytes:bytes,src:ln}); pc+=bytes.length; continue;}
+      }
+
+      let m=line.match(/^\s*([A-Za-z]{2,3})\b\s*(.*)$/);
+      if(!m){ errors.push(`Line ${ln.lineno}: can't parse "${line}"`); output.push({addr:pc,bytes:[],src:ln}); continue;}
+      let mnemonic=m[1].toUpperCase(), operands=m[2].trim();
+      let opinfo=parseOperandMode(operands);
+
+      if(pass===1){ // estimate size
+        let sz=1; if(opinfo.mode==='imm'||opinfo.mode==='indx'||opinfo.mode==='indy')sz=2; else if(opinfo.mode==='ind'||opinfo.mode==='absx'||opinfo.mode==='absy'||opinfo.mode==='abs'||opinfo.mode==='addr') sz=3;
+        output.push({addr:pc,bytes:[],src:ln}); pc+=sz; continue;
+      }
+
+      if(!(mnemonic in OPCODES)){ errors.push(`Line ${ln.lineno}: unknown mnemonic ${mnemonic}`); output.push({addr:pc,bytes:[],src:ln}); continue;}
+      let cand=OPCODES[mnemonic], mode=opinfo.mode;
+      if(mode==='addr'){ let v=parseNumber(opinfo.value); mode=(v!=null&&v<=0xFF)?'zp':'abs'; }
+      let opcode=cand[mode]; if(opcode==null){ errors.push(`Line ${ln.lineno}: opcode ${mnemonic} doesn't support ${mode}`); output.push({addr:pc,bytes:[],src:ln}); continue;}
+      let bytes=[opcode&0xFF];
+      function emitValue(v,size){if(size===1)bytes.push(v&0xFF); else if(size===2){bytes.push(v&0xFF);bytes.push((v>>8)&0xFF);}}
+      if(mode==='imm'||['zp','zpx','zpy','indx','indy'].includes(mode)){ let v=parseNumber(opinfo.value); if(v==null){ if(opinfo.value in symbols)v=symbols[opinfo.value]; else {errors.push(`Line ${ln.lineno}: unknown operand ${opinfo.value}`);v=0;} } emitValue(v,1);}
+      else if(['abs','absx','absy','ind'].includes(mode)){ let v=parseNumber(opinfo.value); if(v==null){ if(opinfo.value in symbols)v=symbols[opinfo.value]; else {errors.push(`Line ${ln.lineno}: unknown operand ${opinfo.value}`);v=0;} } emitValue(v,2);}
+      output.push({addr:pc,bytes:bytes,src:ln}); pc+=bytes.length;
+    }
+  }
+
+  // Build PRG ROM
+  let PRG_BANK_SIZE=16384;
+  let minAddr=Math.min(...output.filter(s=>s.bytes.length).map(s=>s.addr));
+  let maxAddr=Math.max(...output.filter(s=>s.bytes.length).map(s=>s.addr+s.bytes.length-1));
+  let neededBytes=maxAddr-0x8000+1;
+  let prgBanks=Math.max(options.prgBanks,Math.ceil(neededBytes/PRG_BANK_SIZE));
+  let prg=new Uint8Array(prgBanks*PRG_BANK_SIZE).fill(0x00);
+  for(const s of output){ if(s.bytes.length){ let off=s.addr-0x8000; if(off<0){errors.push(`Address below $8000`); continue;} prg.set(s.bytes,off); }}
+
+  // Patch reset vector at $FFFC
+  let resetOffset=0xFFFC-0x8000; if(resetOffset>=0&&resetOffset+1<prg.length){ prg[resetOffset]=0x00; prg[resetOffset+1]=0x80; }
+
+  // iNES header
+  let header=new Uint8Array(16); header[0]=0x4E;header[1]=0x45;header[2]=0x53;header[3]=0x1A;
+  header[4]=prgBanks; header[5]=0; header[6]=0; header[7]=0;
+  let rom=new Uint8Array(header.length+prg.length); rom.set(header,0); rom.set(prg,header.length);
+
+  return {rom,errors,symbols,prgBanks,prgSize:prg.length,output};
+}
+
+assembleBtn.addEventListener('click',()=>{
+  log.textContent=''; downloadBtn.setAttribute('aria-disabled','true'); downloadBtn.removeAttribute('href'); downloadBtn.removeAttribute('download');
+  const src=txtIn.value;
+  const prgBanks=Math.max(1,parseInt(prgBanksInput.value)||1);
+  const res=assemble(src,{prgBanks});
+  if(res.errors.length>0){ log.textContent+='Errors / Warnings:\n'+res.errors.join('\n')+'\n\n'; } 
+  else { log.textContent+='Assembled successfully.\n'; }
+  log.textContent+=`\nPRG banks: ${res.prgBanks}, PRG size: ${res.prgSize} bytes\nSymbols:\n`;
+  for(const s in res.symbols) log.textContent+=`  ${s} = ${hex(res.symbols[s],4)}\n`;
+
+  const blob=new Blob([res.rom],{type:'application/octet-stream'});
+  const url=URL.createObjectURL(blob);
+  downloadBtn.href=url; downloadBtn.download='output.nes'; downloadBtn.setAttribute('aria-disabled','false');
+  downloadBtn.dataset.url=url;
+});
+
+downloadBtn.addEventListener('click',()=>{
+  setTimeout(()=>{ if(downloadBtn.dataset.url){ URL.revokeObjectURL(downloadBtn.dataset.url); delete downloadBtn.dataset.url; } },2000);
+});
+})();
+</script>
+</body>
+</html>
