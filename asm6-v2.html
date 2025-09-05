@@ -51,6 +51,58 @@ loop:   NOP
 <pre id="log"></pre>
 
 <script>
+assembleBtn.addEventListener('click',()=>{
+  log.textContent=''; 
+  downloadBtn.setAttribute('aria-disabled','true'); 
+  downloadBtn.removeAttribute('href'); 
+  downloadBtn.removeAttribute('download');
+
+  const src=txtIn.value;
+  const chrSrc=document.getElementById('chr').value;
+  const prgBanks=Math.max(1,parseInt(prgBanksInput.value)||1);
+  const chrBanks=Math.max(0,parseInt(chrBanksInput.value)||0);
+
+  const res=assemble(src,{prgBanks,chrBanks});
+
+  // Assemble CHR data if provided
+  let chr=new Uint8Array(chrBanks*8192).fill(0x00);
+  if(chrSrc.trim()!==''){
+    const lines=chrSrc.split(/\r?\n/);
+    let chrOffset=0;
+    for(const line of lines){
+      let l=stripComments(line).trim();
+      if(!l) continue;
+      let m=l.match(/^\.byte\s+(.*)$/i) || l.match(/^\.db\s+(.*)$/i);
+      if(!m) continue;
+      let items=m[1].split(',').map(s=>s.trim()).filter(Boolean);
+      for(const it of items){
+        if(chrOffset>=chr.length) break;
+        let v=parseNumber(it);
+        if(v==null) v=0;
+        chr[chrOffset++]=v & 0xFF;
+      }
+    }
+  }
+
+  // Replace CHR-ROM in ROM
+  const headerLen=16;
+  const romWithChr=new Uint8Array(headerLen + res.prgSize + chr.length);
+  romWithChr.set(res.rom.slice(0, headerLen + res.prgSize), 0);
+  romWithChr.set(chr, headerLen + res.prgSize);
+
+  if(res.errors.length>0){ log.textContent+='Errors / Warnings:\n'+res.errors.join('\n')+'\n\n'; } 
+  else { log.textContent+='Assembled successfully.\n'; }
+
+  log.textContent+=`\nPRG banks: ${res.prgBanks}, PRG size: ${res.prgSize} bytes\nCHR banks: ${chrBanks}, CHR size: ${chr.length} bytes\nSymbols:\n`;
+  for(const s in res.symbols) log.textContent+=`  ${s} = ${hex(res.symbols[s],4)}\n`;
+
+  const blob=new Blob([romWithChr],{type:'application/octet-stream'});
+  const url=URL.createObjectURL(blob);
+  downloadBtn.href=url;
+  downloadBtn.download='output.nes';
+  downloadBtn.setAttribute('aria-disabled','false');
+  downloadBtn.dataset.url=url;
+});
 (function(){
   const txtIn = document.getElementById('asm');
   const log = document.getElementById('log');
