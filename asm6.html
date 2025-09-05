@@ -125,7 +125,11 @@ function assemble(src,options){
       let m=line.match(/^\s*([A-Za-z]{2,3})\b\s*(.*)$/);
       if(!m){ errors.push(`Line ${ln.lineno}: can't parse "${line}"`); output.push({addr:pc,bytes:[],src:ln}); continue;}
       let mnemonic=m[1].toUpperCase(), operands=m[2].trim();
-      let opinfo=parseOperandMode(operands);
+      let opinfo=parseOperandMode(operands); 
+      if (['BPL','BMI','BVC','BVS','BCC','BCS','BNE','BEQ'].includes(mnemonic)) {
+    opinfo.mode = 'rel';
+}
+
 
       if(pass===1){ // estimate size
         let sz=1; if(opinfo.mode==='imm'||opinfo.mode==='indx'||opinfo.mode==='indy')sz=2; else if(opinfo.mode==='ind'||opinfo.mode==='absx'||opinfo.mode==='absy'||opinfo.mode==='abs'||opinfo.mode==='addr') sz=3;
@@ -134,6 +138,11 @@ function assemble(src,options){
 
       if(!(mnemonic in OPCODES)){ errors.push(`Line ${ln.lineno}: unknown mnemonic ${mnemonic}`); output.push({addr:pc,bytes:[],src:ln}); continue;}
       let cand=OPCODES[mnemonic], mode=opinfo.mode;
+            // Force branch instructions to relative mode
+if (['BPL','BMI','BVC','BVS','BCC','BCS','BNE','BEQ'].includes(mnemonic)) {
+    mode = 'rel';
+}
+
       if(mode==='addr'){ let v=parseNumber(opinfo.value); mode=(v!=null&&v<=0xFF)?'zp':'abs'; }
       let opcode=cand[mode]; if(opcode==null){ errors.push(`Line ${ln.lineno}: opcode ${mnemonic} doesn't support ${mode}`); output.push({addr:pc,bytes:[],src:ln}); continue;}
       let bytes=[opcode&0xFF];
@@ -141,6 +150,20 @@ function assemble(src,options){
       if(mode==='imm'||['zp','zpx','zpy','indx','indy'].includes(mode)){ let v=parseNumber(opinfo.value); if(v==null){ if(opinfo.value in symbols)v=symbols[opinfo.value]; else {errors.push(`Line ${ln.lineno}: unknown operand ${opinfo.value}`);v=0;} } emitValue(v,1);}
       else if(['abs','absx','absy','ind'].includes(mode)){ let v=parseNumber(opinfo.value); if(v==null){ if(opinfo.value in symbols)v=symbols[opinfo.value]; else {errors.push(`Line ${ln.lineno}: unknown operand ${opinfo.value}`);v=0;} } emitValue(v,2);}
       output.push({addr:pc,bytes:bytes,src:ln}); pc+=bytes.length;
+            if(mode==='rel'){
+    let targetLabel = opinfo.value;
+    let targetAddr = null;
+    if(targetLabel in symbols) targetAddr = symbols[targetLabel];
+    else targetAddr = parseNumber(targetLabel);
+    if(targetAddr == null) { errors.push(`Line ${ln.lineno}: unknown branch target ${targetLabel}`); targetAddr = 0; }
+    let offset = targetAddr - (pc + 2);
+    if(offset < -128 || offset > 127){ errors.push(`Line ${ln.lineno}: branch out of range`); offset = offset & 0xFF; }
+    bytes = [cand['rel'] & 0xFF, offset & 0xFF];
+    output.push({addr:pc, bytes:bytes, src:ln});
+    pc += bytes.length;
+    continue;
+}
+
     }
   }
 
