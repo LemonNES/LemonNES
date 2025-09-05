@@ -38,7 +38,7 @@ loop:   NOP
 
 <div class="row">
   <button id="assemble">Assemble & Build .nes</button>
-  <button class="ghost" id="download" disabled>Download .nes</button>
+  <a class="ghost" id="download" disabled>Download .nes</a>
   <div style="display:flex;align-items:center;gap:8px">
     <label class="small">PRG size (16KB banks):
       <input type="number" id="prgBanks" min="1" value="1"/>
@@ -69,66 +69,112 @@ loop:   NOP
 
   // Opcode table: mnemonic -> {mode: opcode}
   // modes: imm, zp, zpx, zpy, abs, absx, absy, ind, indx, indy, acc, impl, rel
-  const OPCODES = {
-    // Loads
-    'LDA': {imm:0xA9, zp:0xA5, zpx:0xB5, abs:0xAD, absx:0xBD, absy:0xB9, indx:0xA1, indy:0xB1},
-    'LDX': {imm:0xA2, zp:0xA6, zpy:0xB6, abs:0xAE, absy:0xBE},
-    'LDY': {imm:0xA0, zp:0xA4, abs:0xAC, absx:0xBC},
-    // Stores
-    'STA': {zp:0x85, zpx:0x95, abs:0x8D, absx:0x9D, zpy:0x??}, // note: STA zpy doesn't exist; keep as is
-    'STX': {zp:0x86, zpy:0x96, abs:0x8E},
-    'STY': {zp:0x84, zpx:0x94, abs:0x8C},
-    // Arithmetic
-    'ADC': {imm:0x69, zp:0x65, zpx:0x75, abs:0x6D, absx:0x7D, absy:0x79, indx:0x61, indy:0x71},
-    'SBC': {imm:0xE9, zp:0xE5, zpx:0xF5, abs:0xED, absx:0xFD, absy:0xF9, indx:0xE1, indy:0xF1},
-    'AND': {imm:0x29, zp:0x25, zpx:0x35, abs:0x2D, absx:0x3D, absy:0x39, indx:0x21, indy:0x31},
-    'ORA': {imm:0x09, zp:0x05, zpx:0x15, abs:0x0D, absx:0x1D, absy:0x19, indx:0x01, indy:0x11},
-    'EOR': {imm:0x49, zp:0x45, zpx:0x55, abs:0x4D, absx:0x5D, absy:0x59, indx:0x41, indy:0x51},
-    // Comparison
-    'CMP': {imm:0xC9, zp:0xC5, zpx:0xD5, abs:0xCD, absx:0xDD, absy:0xD9, indx:0xC1, indy:0xD1},
-    'CPX': {imm:0xE0, zp:0xE4, abs:0xEC},
-    'CPY': {imm:0xC0, zp:0xC4, abs:0xCC},
-    // Shifts
-    'ASL': {acc:0x0A, zp:0x06, zpx:0x16, abs:0x0E, absx:0x1E},
-    'LSR': {acc:0x4A, zp:0x46, zpx:0x56, abs:0x4E, absx:0x5E},
-    'ROL': {acc:0x2A, zp:0x26, zpx:0x36, abs:0x2E, absx:0x3E},
-    'ROR': {acc:0x6A, zp:0x66, zpx:0x76, abs:0x6E, absx:0x7E},
-    // Jumps & subroutines
-    'JMP': {abs:0x4C, ind:0x6C},
-    'JSR': {abs:0x20},
-    'RTS': {impl:0x60},
-    'RTI': {impl:0x40},
-    // Branches (relative)
-    'BEQ': {rel:0xF0}, 'BNE': {rel:0xD0}, 'BMI': {rel:0x30}, 'BPL': {rel:0x10},
-    'BCS': {rel:0xB0}, 'BCC': {rel:0x90}, 'BVS': {rel:0x70}, 'BVC': {rel:0x50},
-    // Stack / flags
-    'PHA': {impl:0x48}, 'PLA': {impl:0x68}, 'PHP': {impl:0x08}, 'PLP': {impl:0x28},
-    'CLC': {impl:0x18}, 'SEC': {impl:0x38}, 'CLI': {impl:0x58}, 'SEI': {impl:0x78},
-    'CLV': {impl:0xB8}, 'CLD': {impl:0xD8}, 'SED': {impl:0xF8},
-    // Misc
-    'NOP': {impl:0xEA}, 'BIT': {zp:0x24, abs:0x2C},
-    'BRK': {impl:0x00}
-  };
+ // Official + Undocumented 6502 Opcodes
+const OPCODES = {
+  'LDA': {imm:0xA9, zp:0xA5, zpx:0xB5, abs:0xAD, absx:0xBD, absy:0xB9, indx:0xA1, indy:0xB1},
+  'LDX': {imm:0xA2, zp:0xA6, zpy:0xB6, abs:0xAE, absy:0xBE},
+  'LDY': {imm:0xA0, zp:0xA4, zpx:0xB4, abs:0xAC, absx:0xBC},
+  'STA': {zp:0x85, zpx:0x95, abs:0x8D, absx:0x9D, absy:0x99, indx:0x81, indy:0x91},
+  'STX': {zp:0x86, zpy:0x96, abs:0x8E},
+  'STY': {zp:0x84, zpx:0x94, abs:0x8C},
 
-  // Fix: remove unknown placeholders; some opcodes not present in map (like STA zpy) will be flagged later.
+  // --- Arithmetic & Logic ---
+  'ADC': {imm:0x69, zp:0x65, zpx:0x75, abs:0x6D, absx:0x7D, absy:0x79, indx:0x61, indy:0x71},
+  'SBC': {imm:0xE9, zp:0xE5, zpx:0xF5, abs:0xED, absx:0xFD, absy:0xF9, indx:0xE1, indy:0xF1},
+  'AND': {imm:0x29, zp:0x25, zpx:0x35, abs:0x2D, absx:0x3D, absy:0x39, indx:0x21, indy:0x31},
+  'ORA': {imm:0x09, zp:0x05, zpx:0x15, abs:0x0D, absx:0x1D, absy:0x19, indx:0x01, indy:0x11},
+  'EOR': {imm:0x49, zp:0x45, zpx:0x55, abs:0x4D, absx:0x5D, absy:0x59, indx:0x41, indy:0x51},
+
+  // --- Compare ---
+  'CMP': {imm:0xC9, zp:0xC5, zpx:0xD5, abs:0xCD, absx:0xDD, absy:0xD9, indx:0xC1, indy:0xD1},
+  'CPX': {imm:0xE0, zp:0xE4, abs:0xEC},
+  'CPY': {imm:0xC0, zp:0xC4, abs:0xCC},
+
+  // --- Increments / Decrements ---
+  'INC': {zp:0xE6, zpx:0xF6, abs:0xEE, absx:0xFE},
+  'DEC': {zp:0xC6, zpx:0xD6, abs:0xCE, absx:0xDE},
+  'INX': {impl:0xE8}, 'DEX': {impl:0xCA},
+  'INY': {impl:0xC8}, 'DEY': {impl:0x88},
+
+  // --- Shifts / Rotates ---
+  'ASL': {acc:0x0A, zp:0x06, zpx:0x16, abs:0x0E, absx:0x1E},
+  'LSR': {acc:0x4A, zp:0x46, zpx:0x56, abs:0x4E, absx:0x5E},
+  'ROL': {acc:0x2A, zp:0x26, zpx:0x36, abs:0x2E, absx:0x3E},
+  'ROR': {acc:0x6A, zp:0x66, zpx:0x76, abs:0x6E, absx:0x7E},
+
+  // --- Control Flow ---
+  'JMP': {abs:0x4C, ind:0x6C},
+  'JSR': {abs:0x20}, 'RTS': {impl:0x60}, 'RTI': {impl:0x40},
+  'BEQ': {rel:0xF0}, 'BNE': {rel:0xD0}, 'BMI': {rel:0x30}, 'BPL': {rel:0x10},
+  'BCS': {rel:0xB0}, 'BCC': {rel:0x90}, 'BVS': {rel:0x70}, 'BVC': {rel:0x50},
+  'BRK': {impl:0x00}, 'NOP': {impl:0xEA},
+
+  // --- Flags & Stack ---
+  'CLC': {impl:0x18}, 'SEC': {impl:0x38},
+  'CLI': {impl:0x58}, 'SEI': {impl:0x78},
+  'CLV': {impl:0xB8}, 'CLD': {impl:0xD8}, 'SED': {impl:0xF8},
+  'PHA': {impl:0x48}, 'PLA': {impl:0x68},
+  'PHP': {impl:0x08}, 'PLP': {impl:0x28},
+  'TXS': {impl:0x9A}, 'TSX': {impl:0xBA},
+
+  // --- Transfers ---
+  'TAX': {impl:0xAA}, 'TXA': {impl:0x8A},
+  'TAY': {impl:0xA8}, 'TYA': {impl:0x98},
+
+  // --- Misc ---
+  'BIT': {zp:0x24, abs:0x2C},
+
+  // === UNDOCUMENTED (Illegal) Opcodes ===
+  'LAX': {zp:0xA7, zpy:0xB7, abs:0xAF, absx:0xBF, indx:0xA3, indy:0xB3}, // LDA+LDX
+  'SAX': {zp:0x87, zpy:0x97, abs:0x8F, indx:0x83},                      // STA+STX
+  'DCP': {zp:0xC7, zpx:0xD7, abs:0xCF, absx:0xDF, absy:0xDB, indx:0xC3, indy:0xD3}, // DEC+CMP
+  'ISB': {zp:0xE7, zpx:0xF7, abs:0xEF, absx:0xFF, absy:0xFB, indx:0xE3, indy:0xF3}, // INC+SBC
+  'SLO': {zp:0x07, zpx:0x17, abs:0x0F, absx:0x1F, absy:0x1B, indx:0x03, indy:0x13}, // ASL+ORA
+  'RLA': {zp:0x27, zpx:0x37, abs:0x2F, absx:0x3F, absy:0x3B, indx:0x23, indy:0x33}, // ROL+AND
+  'SRE': {zp:0x47, zpx:0x57, abs:0x4F, absx:0x5F, absy:0x5B, indx:0x43, indy:0x53}, // LSR+EOR
+  'RRA': {zp:0x67, zpx:0x77, abs:0x6F, absx:0x7F, absy:0x7B, indx:0x63, indy:0x73}, // ROR+ADC
+  'ANC': {imm:0x0B}, // AND+Carry
+  'ALR': {imm:0x4B}, // AND+LSR
+  'ARR': {imm:0x6B}, // AND+ROR
+  'XAA': {imm:0x8B}, // (unstable)
+  'AXS': {imm:0xCB}, // (SBX)
+  'SBC': {imm:0xEB}, // alternate SBC immediate
+  'AHX': {absy:0x9F, indy:0x93}, // store A&X&high(addr+1)
+  'TAS': {absy:0x9B}, // store A&X in SP and mem
+  'SHY': {absx:0x9C}, // store Y&high(addr+1)
+  'SHX': {absy:0x9E}, // store X&high(addr+1)
+  'LAS': {absy:0xBB}  // load A,X,SP from mem & SP
+  };
 
   // helpers
   function hex(n, len=2){
-    let s = n.toString(16).toUpperCase();
+    let s = (n >>> 0).toString(16).toUpperCase();
     while(s.length < len) s = '0'+s;
     return '$' + s;
   }
 
   function parseNumber(tok){
-    tok = tok.trim();
     if(!tok) return null;
+    tok = tok.trim();
     // hex $hh or $hhhh
-    if(tok.startsWith('$')) return parseInt(tok.slice(1),16);
-    if(tok.startsWith('%')) return parseInt(tok.slice(1),2);
+    if(tok.startsWith('$')) {
+      let v = parseInt(tok.slice(1),16);
+      return Number.isNaN(v) ? null : v;
+    }
+    if(tok.startsWith('%')) {
+      let v = parseInt(tok.slice(1),2);
+      return Number.isNaN(v) ? null : v;
+    }
     // 0x...
-    if(tok.startsWith('0x')) return parseInt(tok.slice(2),16);
+    if(tok.startsWith('0x')) {
+      let v = parseInt(tok.slice(2),16);
+      return Number.isNaN(v) ? null : v;
+    }
     // decimal
-    if(/^[-+]?\d+$/.test(tok)) return parseInt(tok,10);
+    if(/^[-+]?\d+$/.test(tok)) {
+      let v = parseInt(tok,10);
+      return Number.isNaN(v) ? null : v;
+    }
     return null;
   }
 
@@ -138,64 +184,39 @@ loop:   NOP
     return line;
   }
 
-  function tokenizeOperands(opStr){
-    // split by comma, trim
-    return opStr.split(',').map(s=>s.trim()).filter(s=>s.length>0);
-  }
-
   function parseOperandMode(op){
-    // returns {mode, valueStr}
-    if(!op) return {mode:'impl', value: null};
+    // returns {mode, value}
+    if(!op || op.trim()==='') return {mode:'impl', value: null};
+    op = op.trim();
     // accumulator
-    if(op.toUpperCase() === 'A') return {mode:'acc', value:null};
+    if(/^A$/i.test(op)) return {mode:'acc', value:null};
     // immediate
     if(op.startsWith('#')) {
       let v = op.slice(1).trim();
       return {mode:'imm', value:v};
     }
-    // indirect (addr)
-    if(op.startsWith('(') && op.endsWith(')')){
-      let inside = op.slice(1,-1).trim();
-      // (addr,X) or (addr),Y
-      if(inside.endsWith(',X') || inside.endsWith(',x')){
-        return {mode:'indx', value:inside.slice(0,-2).trim()};
-      }
-      if(inside.indexOf(')')===-1 && op.endsWith('),Y')){} // handled below
-      if(op.endsWith('),Y') || op.endsWith('),y') ){
-        // syntax like (addr),Y -- but we have op surrounding parentheses; already checked above won't match. So we detect pattern like "(xxx),Y" (outer string may still have '),Y')
-        // To be safe:
-      }
-      // plain (addr)
-      if(op.includes('),Y') || op.includes('),y')){
-        // (addr),Y format
-        let m = op.match(/^\(([^)]+)\),\s*Y$/i);
-        if(m) return {mode:'indy', value:m[1].trim()};
-      }
-      // If inside contains ',X' (rare), handle
-      if(inside.includes(',X') || inside.includes(',x')){
-        let base = inside.replace(/,X/i,'').trim();
-        return {mode:'indx', value:base};
-      }
-      // default indirect (only used by JMP)
-      return {mode:'ind', value: inside};
-    }
-    // addressing with ,X or ,Y
-    if(op.endsWith(',X') || op.endsWith(',x')) {
-      let v = op.slice(0, -2).trim();
-      return {mode:'absx', value: v};
-    }
-    if(op.endsWith(',Y') || op.endsWith(',y')) {
-      let v = op.slice(0, -2).trim();
-      return {mode:'absy', value: v};
-    }
-    // zero page vs absolute must be decided by value size at assemble time.
-    // but we'll return 'addr' and decide later.
-    return {mode:'addr', value: op};
-  }
+    // indirect forms: (addr,X) or (addr),Y or (addr)
+    // check (addr,X) or (addr,x)
+    let m1 = op.match(/^\(\s*([^)]+?)\s*,\s*[Xx]\s*\)$/);
+    if(m1) return {mode:'indx', value:m1[1].trim()};
+    // check (addr),Y
+    let m2 = op.match(/^\(\s*([^)]+?)\s*\)\s*,\s*[Yy]$/);
+    if(m2) return {mode:'indy', value:m2[1].trim()};
+    // plain (addr)
+    let m3 = op.match(/^\(\s*([^)]+?)\s*\)$/);
+    if(m3) return {mode:'ind', value:m3[1].trim()};
 
-  function toByteArray(words){
-    // convert array of numbers 0..255 to Uint8Array
-    return new Uint8Array(words);
+    // indexed addressing like "addr,X" or "addr,Y"
+    let m4 = op.match(/^(.+?)\s*,\s*([XxYy])$/);
+    if(m4){
+      let base = m4[1].trim();
+      let reg = m4[2].toUpperCase();
+      if(reg==='X') return {mode:'absx', value: base};
+      else return {mode:'absy', value: base};
+    }
+
+    // default: numeric or label address; resolve to 'addr' and decide zp vs abs later
+    return {mode:'addr', value: op};
   }
 
   // Assembler core
@@ -214,29 +235,28 @@ loop:   NOP
     let symbols = {}; // label -> address
     let output = []; // list of {addr, bytes, src}
     let errors = [];
-    let pass = 1;
 
-    // first pass: labels and sizes
-    for(pass=1; pass<=2; pass++){
+    // two passes
+    for(let pass=1; pass<=2; pass++){
       pc = org;
       output = [];
-      if(pass==2) log.textContent += '\n--- PASS 2 ---\n';
+      if(pass===2) log.textContent += '\n--- PASS 2 ---\n';
       for(const ln of cleanLines){
         let line = ln.text;
         if(line==='') { output.push({addr:pc, bytes:[], src:ln}); continue; }
-        // label?
+
+        // full-line label
         if(/^[A-Za-z_][\w]*:$/.test(line)){
           let lbl = line.replace(/:$/,'');
           if(pass===1){
             if(lbl in symbols) errors.push(`Line ${ln.lineno}: duplicate label ${lbl}`);
             symbols[lbl] = pc;
-          } else {
-            // check consistency?
           }
           output.push({addr:pc, bytes:[], src:ln});
           continue;
         }
-        // label + instr on same line: "label: INSN ..."
+
+        // label + instruction on same line
         if(/^[A-Za-z_][\w]*:\s+/.test(line)){
           let m = line.match(/^([A-Za-z_][\w]*):\s*(.*)$/);
           if(m){
@@ -246,88 +266,70 @@ loop:   NOP
               symbols[lbl] = pc;
             }
             line = rest;
-            // continue parsing line as instruction below
           }
         }
-        // directive?
+
+        // directive
         if(line.startsWith('.')){
           let parts = line.split(/\s+/);
           let dir = parts[0].toLowerCase();
           if(dir === '.org'){
-            let arg = parts.slice(1).join(' ').trim();
+            let arg = line.substring(dir.length).trim();
             let n = parseNumber(arg);
             if(n==null) { errors.push(`Line ${ln.lineno}: can't parse .org ${arg}`); }
             else { org = n; pc = n; }
             output.push({addr:pc, bytes:[], src:ln});
             continue;
           } else if(dir==='.byte' || dir==='.db'){
-            // count bytes
             let rest = line.substring(dir.length).trim();
             let items = rest.split(',').map(s=>s.trim()).filter(Boolean);
-            let count = items.length;
-            if(pass===1){
-              pc += count;
-            } else {
-              // produce bytes
-              let bytes = [];
-              for(const it of items){
-                if(it.startsWith('$')||it.startsWith('%')||/^0x/.test(it)||/^-?\d+$/.test(it)){
-                  let n = parseNumber(it);
-                  if(n==null) { errors.push(`Line ${ln.lineno}: bad number ${it}`); n=0; }
-                  bytes.push(n & 0xFF);
-                } else if(/^'.'$/.test(it) || /^".+"$/.test(it)){
-                  // char literal
-                  let ch = it.slice(1,-1);
-                  if(ch.length===1) bytes.push(ch.charCodeAt(0));
-                  else {
-                    for(let c of ch) bytes.push(c.charCodeAt(0));
-                  }
-                } else {
-                  // maybe label
-                  if(pass===1) { bytes.push(0); } else {
-                    let v = symbols[it];
-                    if(v==null) { errors.push(`Line ${ln.lineno}: unknown symbol ${it}`); v = 0; }
-                    bytes.push(v & 0xFF);
-                  }
-                }
+            if(pass===1){ pc += items.length; output.push({addr:pc-items.length, bytes:[], src:ln}); continue; }
+            let bytes = [];
+            for(const it of items){
+              if(it.startsWith('$')||it.startsWith('%')||/^0x/.test(it)||/^-?\d+$/.test(it)){
+                let n = parseNumber(it);
+                if(n==null) { errors.push(`Line ${ln.lineno}: bad number ${it}`); n=0; }
+                bytes.push(n & 0xFF);
+              } else if(/^'.'$/.test(it) || /^".+"$/.test(it)){
+                let ch = it.slice(1,-1);
+                if(ch.length===1) bytes.push(ch.charCodeAt(0));
+                else for(let c of ch) bytes.push(c.charCodeAt(0));
+              } else {
+                // symbol
+                if(!(it in symbols)) { errors.push(`Line ${ln.lineno}: unknown symbol ${it}`); bytes.push(0); }
+                else bytes.push(symbols[it] & 0xFF);
               }
-              output.push({addr:pc, bytes:bytes, src:ln});
-              pc += bytes.length;
             }
+            output.push({addr:pc, bytes:bytes, src:ln});
+            pc += bytes.length;
             continue;
           } else if(dir==='.word'){
             let rest = line.substring(dir.length).trim();
             let items = rest.split(',').map(s=>s.trim()).filter(Boolean);
-            if(pass===1){ pc += items.length*2; }
-            else {
-              let bytes = [];
-              for(const it of items){
-                let n = parseNumber(it);
-                if(n==null){
-                  if(it in symbols) n = symbols[it]; else { errors.push(`Line ${ln.lineno}: unknown word ${it}`); n = 0; }
-                }
-                bytes.push(n & 0xFF);
-                bytes.push((n>>8)&0xFF);
+            if(pass===1){ pc += items.length*2; output.push({addr:pc-items.length*2, bytes:[], src:ln}); continue; }
+            let bytes = [];
+            for(const it of items){
+              let n = parseNumber(it);
+              if(n==null){
+                if(it in symbols) n = symbols[it]; else { errors.push(`Line ${ln.lineno}: unknown word ${it}`); n = 0; }
               }
-              output.push({addr:pc, bytes:bytes, src:ln});
-              pc += bytes.length;
+              bytes.push(n & 0xFF);
+              bytes.push((n>>8)&0xFF);
             }
+            output.push({addr:pc, bytes:bytes, src:ln});
+            pc += bytes.length;
             continue;
           } else if(dir==='.fill'){
-            // .fill count, value
             let rest = line.substring(dir.length).trim();
             let parts = rest.split(',').map(s=>s.trim());
             let cnt = parseNumber(parts[0]) || 0;
             let val = parseNumber(parts[1]) || 0;
-            if(pass===1) pc += cnt;
-            else {
-              let bytes = new Array(cnt).fill(val & 0xFF);
-              output.push({addr:pc, bytes:bytes, src:ln});
-              pc += cnt;
-            }
+            if(pass===1){ pc += cnt; output.push({addr:pc-cnt, bytes:[], src:ln}); continue; }
+            let bytes = new Array(cnt).fill(val & 0xFF);
+            output.push({addr:pc, bytes:bytes, src:ln});
+            pc += cnt;
             continue;
           } else {
-            // unknown directive - warn but ignore
             if(pass===2) log.textContent += `Line ${ln.lineno}: warning: unknown directive ${dir}\n`;
             output.push({addr:pc, bytes:[], src:ln});
             continue;
@@ -335,23 +337,20 @@ loop:   NOP
         } // end directives
 
         // instruction parsing
-        // split mnemonic and operand(s)
         let m = line.match(/^\s*([A-Za-z]{2,3})\b\s*(.*)$/);
         if(!m){
-          // maybe a blank or only a comment (already stripped)
-          if(line.trim()==='') { output.push({addr:pc, bytes:[], src:ln}); continue; }
           errors.push(`Line ${ln.lineno}: can't parse line: "${line}"`);
           output.push({addr:pc, bytes:[], src:ln});
           continue;
         }
         let mnemonic = m[1].toUpperCase();
         let operands = m[2].trim();
-        // split by comma if needed - but single operand only for 6502 most
-        // detect addressing mode
+
+        // determine operand mode
         let opinfo = parseOperandMode(operands);
-        // in pass 1, advance pc by expected size
+
         if(pass===1){
-          // determine size heuristically; for addr mode unknown size until we know value; assume absolute (3) or zeropage (2) depending on numeric value if numeric literal.
+          // estimate size
           let opMode = opinfo.mode;
           let sz = 1;
           if(opMode==='impl' || opMode==='acc') sz = 1;
@@ -360,38 +359,31 @@ loop:   NOP
           else if(opMode==='ind') sz = 3;
           else if(opMode==='rel') sz = 2;
           else if(opMode==='addr' || opMode==='absx' || opMode==='absy') {
-            // try parse numeric value to decide zp vs abs
             let v = parseNumber(opinfo.value);
             if(v!=null && v>=0 && v<=0xFF) sz = 2; else sz = 3;
-          } else {
-            // default
-            sz = 1;
-          }
+          } else sz = 1;
+          output.push({addr:pc, bytes:[], src:ln});
           pc += sz;
-          output.push({addr:pc-sz, bytes:[], src:ln});
           continue;
-        } // pass 1 done
+        } // end pass 1
 
-        // PASS 2: produce bytes
+        // PASS 2
         let bytes = [];
-        // branch and pseudo-mode handling will happen here
         if(!(mnemonic in OPCODES)){
           errors.push(`Line ${ln.lineno}: unknown mnemonic ${mnemonic}`);
           output.push({addr:pc, bytes:[], src:ln});
           continue;
         }
-        // Determine specific opcode by trying modes in precedence
         let cand = OPCODES[mnemonic];
         let mode = opinfo.mode;
-        // normalize some modes
+
+        // resolve addr -> zp or abs
         if(mode==='addr'){
-          // numeric? choose zp if value <= 0xFF, else abs
           let v = parseNumber(opinfo.value);
           if(v!=null && v>=0 && v<=0xFF) mode='zp'; else mode='abs';
         }
-        // handle rel specially: operand might be a label
+
         if(mode==='rel'){
-          // operand string is in operands variable (e.g., label)
           let targetLabel = operands.trim();
           let targetAddr = null;
           if(targetLabel in symbols) targetAddr = symbols[targetLabel];
@@ -403,8 +395,6 @@ loop:   NOP
             errors.push(`Line ${ln.lineno}: unknown branch target ${targetLabel}`);
             targetAddr = 0;
           }
-          // offset is relative to next instruction (pc + instrSize)
-          // current pc is the address of opcode (we haven't emitted it yet). Branches are 2 bytes long (opcode + offset).
           let offset = targetAddr - (pc + 2);
           if(offset < -128 || offset > 127){
             errors.push(`Line ${ln.lineno}: branch out of range to ${targetLabel} (offset ${offset})`);
@@ -419,26 +409,15 @@ loop:   NOP
           continue;
         }
 
-        // find candidate opcode for the resolved mode
         let opcode = cand[mode];
-        // If not found, try some fallbacks: e.g., absx fallback to abs if X=0? No — must error.
         if(opcode==null){
-          // try some synonyms: zpx vs zpx
-          if(mode==='zpx' && cand['zpx']) opcode = cand['zpx'];
-        }
-        if(opcode==null){
-          // In many cases assembly writers use "absx" even if only abs,X exists; we have absx keys as 'absx'
-          // fallback map: indx -> indexed indirect, indy -> indirect indexed, etc already matched
-          // If still null, show an error
           errors.push(`Line ${ln.lineno}: opcode ${mnemonic} doesn't support addressing mode ${mode}`);
           output.push({addr:pc, bytes:[], src:ln});
           continue;
         }
 
-        // emit opcode byte
         bytes.push(opcode & 0xFF);
 
-        // emit operand bytes if needed
         function emitValue(v, size){
           if(size===1) bytes.push(v & 0xFF);
           else if(size===2){ bytes.push(v & 0xFF); bytes.push((v>>8)&0xFF); }
@@ -448,12 +427,10 @@ loop:   NOP
           let valStr = opinfo.value;
           let v = parseNumber(valStr);
           if(v==null){
-            // maybe symbol
             if(valStr in symbols) v = symbols[valStr]; else { errors.push(`Line ${ln.lineno}: unknown immediate ${valStr}`); v=0; }
           }
           emitValue(v,1);
         } else if(['zp','zpx','zpy','indx','indy'].includes(mode)){
-          // zero-page or pointer modes need 1 byte
           let v = parseNumber(opinfo.value);
           if(v==null){
             if(opinfo.value in symbols) v = symbols[opinfo.value]; else { errors.push(`Line ${ln.lineno}: unknown operand ${opinfo.value}`); v = 0; }
@@ -466,21 +443,15 @@ loop:   NOP
           }
           emitValue(v,2);
         } else if(mode==='acc' || mode==='impl'){
-          // no extra bytes
-        } else {
-          // unknown mode
+          // nothing to do
         }
 
         output.push({addr:pc, bytes:bytes, src:ln});
         pc += bytes.length;
-      } // end loop lines
-      // after pass 1, ensure vectors if used present - but we will patch vectors later based on .org or explicit .word
-      // Nothing else
+      } // end for each line
     } // end passes
 
-    // Build PRG binary from assembled output
-    // We'll place bytes into a PRG image starting from 'org' (virtual CPU start). But iNES PRG ROM expects cartridge CPU address mapping: typically PRG is mapped to $8000. So we'll create a PRG buffer that represents CPU address range $8000..($8000 + PRGsize*16KB -1)
-    // Determine PRG bank count: either from options.prgBanks or compute needed size
+    // Build PRG binary
     let minAddr = org;
     let maxAddr = org;
     for(const s of output){
@@ -491,14 +462,12 @@ loop:   NOP
     }
     let neededBytes = Math.max(1, (maxAddr - org + 1));
     let prgBanks = Math.max(1, parseInt(options.prgBanks) || 1);
-    // if user specified small bank but assembly bigger, expand
     let neededBanks = Math.ceil(neededBytes / 16384);
     if(prgBanks < neededBanks) prgBanks = neededBanks;
 
     let prgSize = prgBanks * 16384;
     let prg = new Uint8Array(prgSize).fill(0x00);
 
-    // Place bytes at offset (addr - org)
     for(const s of output){
       if(s.bytes && s.bytes.length>0){
         let off = s.addr - org;
@@ -510,22 +479,17 @@ loop:   NOP
       }
     }
 
-    // Find RESET vector location: in NES, vectors are at $FFFC/$FFFD (reset), $FFFA/$FFFB (NMI), $FFFE/$FFFF (IRQ)
-    // If the user placed .org and wrote words there, these bytes will already be in PRG area at addresses >= org.
-    // If not present, attempt to set reset vector to org (default).
-    let vectAddr = 0xFFFC; // reset vector low byte location
+    // Patch reset vector at $FFFC if present in PRG and zero
+    let vectAddr = 0xFFFC;
     let vectOffset = vectAddr - org;
     if(vectOffset >= 0 && vectOffset+1 < prg.length){
       let low = prg[vectOffset];
       let high = prg[vectOffset+1];
       if(low===0 && high===0){
-        // patch to org
         let addr = org;
         prg[vectOffset] = addr & 0xFF;
         prg[vectOffset+1] = (addr>>8) & 0xFF;
       }
-    } else {
-      // if vectors outside PRG mapping, we can't patch
     }
 
     // CHR: produce 8KB of zeros for CHR-ROM
@@ -535,23 +499,23 @@ loop:   NOP
     let header = new Uint8Array(16);
     header[0]=0x4E; header[1]=0x45; header[2]=0x53; header[3]=0x1A; // "NES\x1A"
     header[4]=prgBanks & 0xFF; // PRG bank count (16KB units)
-    header[5]=1; // CHR banks (8KB units) - we produce 1 by default
-    header[6]=0; header[7]=0; header[8]=0; header[9]=0; // flags/reserved
-    // rest zero
+    header[5]=1; // CHR banks (8KB units)
+    // flags/reserved left as zeros
 
-    // final rom bytes
     let rom = new Uint8Array(header.length + prg.length + chr.length);
     rom.set(header,0);
     rom.set(prg, header.length);
     rom.set(chr, header.length + prg.length);
 
-    return {rom, logLines: [], errors, symbols, prgBanks, prgSize, output};
+    return {rom, errors, symbols, prgBanks, prgSize, output};
   }
 
   // UI
   assembleBtn.addEventListener('click', ()=>{
     log.textContent = '';
-    downloadBtn.disabled = true;
+    downloadBtn.setAttribute('aria-disabled','true');
+    downloadBtn.removeAttribute('href');
+    downloadBtn.removeAttribute('download');
     const src = txtIn.value;
     let prgBanks = parseInt(prgBanksInput.value) || 1;
     const res = assemble(src, {prgBanks});
@@ -569,13 +533,12 @@ loop:   NOP
     const url = URL.createObjectURL(blob);
     downloadBtn.href = url;
     downloadBtn.download = 'output.nes';
-    downloadBtn.disabled = false;
-    // store for click (revoke on next assemble)
+    downloadBtn.setAttribute('aria-disabled','false');
+    // store for revoke later
     downloadBtn.dataset.url = url;
   });
 
   downloadBtn.addEventListener('click', (e)=>{
-    // let browser handle download; revoke will be handled on next assemble
     setTimeout(()=>{
       if(downloadBtn.dataset.url) { URL.revokeObjectURL(downloadBtn.dataset.url); delete downloadBtn.dataset.url; }
     }, 2000);
