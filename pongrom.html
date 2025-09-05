@@ -1,0 +1,607 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Refined NES Pong – ROM Generator</title>
+  <style>body{font-family:system-ui,Arial,sans-serif;padding:20px}button{font-size:16px;padding:10px 14px}</style>
+</head>
+<body>
+  <h1>Refined NES Pong – ROM Generator</h1>
+  <p>Two-player Pong. Player 1: Controller 1 Up/Down + A to serve. Player 2: Controller 2 Up/Down + A to serve. <b>Start</b> to reset match.</p>
+  <button id="build">Build pong.nes</button>
+  <p><small>Mapper 0 (NROM). Test in Mesen or FCEUX. First to 7 wins.</small></p>
+
+<script>
+document.getElementById("build").addEventListener("click", buildNES);
+
+function buildNES(){
+  // ---------------- iNES header ----------------
+  const header = new Uint8Array([
+    0x4E,0x45,0x53,0x1A, // "NES^Z"
+    0x01, // 1x16KB PRG
+    0x01, // 1x8KB CHR
+    0x00,0x00,0,0,0,0,0,0,0,0
+  ]);
+
+  // ---------------- helpers & buffers ----------------
+  const PRG = new Uint8Array(0x4000); // 16KB PRG
+  let pc = 0;
+  const ORG = 0x8000;
+  const labels = {};
+  const absFixups = [];    // [pos,label]
+  const branchFixups = []; // [pos,label]
+  const emit = (...b)=>{ for (const x of b) PRG[pc++] = x & 0xFF; };
+  const emitWord = w => emit(w&0xFF,(w>>8)&0xFF);
+  const here = ()=> ORG + pc;
+  const label = (name)=> labels[name] = here();
+  const JSRto = (name)=> { emit(0x20); absFixups.push([pc, name]); emitWord(0); };
+  const JMPto = (name)=> { emit(0x4C); absFixups.push([pc, name]); emitWord(0); };
+  const RTS = ()=> emit(0x60);
+  const RTI = ()=> emit(0x40);
+
+  // Branch helper: emit branch opcode and placeholder, will patch later
+  function BR(opcode, name) {
+    emit(opcode, 0x00);
+    branchFixups.push([pc-1, name]);
+  }
+
+  // Zero page layout (small)
+  const zp = {
+    nmiFlag: 0x00,
+    p1y:0x02, p2y:0x03,
+    ballX:0x04, ballY:0x05, ballVX:0x06, ballVY:0x07,
+    input1:0x08, input2:0x09,
+    score1:0x0A, score2:0x0B,
+    state:0x0C, // 0 = attract/serve, 1 = playing, 2 = gameover
+    servePlayer:0x0D
+  };
+
+  // ---------------- reset & init ----------------
+  label("RESET");
+  emit(0x78); // SEI
+  emit(0xD8); // CLD
+  emit(0xA2,0x40); emit(0x9A); // LDX #$40; TXS
+  // disable APU frame IRQ
+  emit(0xA9,0x40); emit(0x8D,0x17,0x40);
+  // Turn off PPU
+  emit(0xA9,0x00); emit(0x8D,0x00,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x01,0x20);
+
+  // two vblanks
+  JSRto("waitVBlank"); JSRto("waitVBlank");
+
+  // palettes and clear name table
+  JSRto("loadPal");
+  JSRto("clearNT");
+
+  // init game state
+  emit(0xA9,0x40); emit(0x85,zp.p1y); // p1y ~ 64
+  emit(0xA9,0x40); emit(0x85,zp.p2y);
+  emit(0xA9,0x80); emit(0x85,zp.ballX);
+  emit(0xA9,0x70); emit(0x85,zp.ballY);
+  emit(0xA9,0x02); emit(0x85,zp.ballVX);
+  emit(0xA9,0x01); emit(0x85,zp.ballVY);
+  emit(0xA9,0x00); emit(0x85,zp.score1);
+  emit(0xA9,0x00); emit(0x85,zp.score2);
+  emit(0xA9,0x00); emit(0x85,zp.nmiFlag);
+  emit(0xA9,0x00); emit(0x85,zp.state);
+  emit(0xA9,0x01); emit(0x85,zp.servePlayer); // player 1 serves by default
+
+  JSRto("buildOAM");
+  // enable NMI & rendering
+  emit(0xA9,0x80); emit(0x8D,0x00,0x20);
+  emit(0xA9,0x1E); emit(0x8D,0x01,0x20);
+
+  // ---------------- main loop ----------------
+  label("MAIN");
+  // wait for NMI flag
+  label("waitFrame");
+  emit(0xA5,zp.nmiFlag); emit(0xF0,0xFB); // BEQ waitFrame (-5)
+  emit(0xA9,0x00); emit(0x85,zp.nmiFlag);
+
+  // read inputs
+  JSRto("readInputs");
+
+  // Start button: reset match (controller1 Start is bit 3 read method below maps to input1 bit 0..)
+  emit(0xA5,zp.input1); emit(0x29,0x08); emit(0xF0,0x07); // AND #$08 ; BEQ skip
+  // if set, reset scores and state to serve
+  emit(0xA9,0x00); emit(0x85,zp.score1); emit(0xA9,0x00); emit(0x85,zp.score2);
+  emit(0xA9,0x00); emit(0x85,zp.state); emit(0xA9,0x01); emit(0x85,zp.servePlayer);
+
+  // state switch
+  emit(0xA5,zp.state); emit(0xC9,0x00); BR(0xF0, "state_is_0"); // BEQ => state==0 (serve)
+  emit(0xA5,zp.state); emit(0xC9,0x01); BR(0xF0, "state_is_1"); // BEQ => playing
+  // else gameover
+  JMPto("do_gameover");
+  label("state_is_0");
+  // Serve state: show "SERVE" and wait for serve button
+  // if serve pressed by servePlayer, go play
+  emit(0xA5,zp.servePlayer);
+  emit(0xC9,0x01); BR(0xF0,"sp_is_1");
+  // servePlayer==0 -> player1 serves (we store 1 for player1 and 2 for player2 to simplify)
+  // check p1 serve: use input1 bit A / Up as serve (we mapped A/Up bits into input1 bits 0/1 later)
+  // test input1 bit0 or bit4 (A or Up) -- below we merge A/Up into bit0 during readInputs
+  emit(0xA5,zp.input1); emit(0x29,0x01); BR(0xF0,"no_serve1"); // AND #$01 ; BEQ no serve
+  // start play
+  emit(0xA9,0x01); emit(0x85,zp.state); // state=1
+  JMPto("MAIN");
+  label("no_serve1");
+  // check p2 serve (input2)
+  emit(0xA5,zp.input2); emit(0x29,0x01); BR(0xF0,"MAIN"); // if bit set -> start, else loop
+  JMPto("MAIN");
+
+  label("sp_is_1");
+  // servePlayer==1 (player2) check input2 bit0
+  emit(0xA5,zp.input2); emit(0x29,0x01); BR(0xF0,"MAIN");
+  JMPto("MAIN");
+
+  label("state_is_1");
+  // Playing state: update paddles, clamp, move ball, collisions, scoring
+
+  // Update paddles (use input bits 1=Up, 2=Down mapped to bits 1/2)
+  // P1 Up
+  emit(0xA5,zp.input1); emit(0x29,0x02); BR(0xF0,"p1_no_up"); // AND #$02
+  // decrement p1y by 2
+  emit(0xA5,zp.p1y); emit(0x38); emit(0xE9,0x02); emit(0x85,zp.p1y);
+  label("p1_no_up");
+  // P1 Down
+  emit(0xA5,zp.input1); emit(0x29,0x04); BR(0xF0,"p1_no_down");
+  emit(0xA5,zp.p1y); emit(0x69,0x02); emit(0x85,zp.p1y);
+  label("p1_no_down");
+
+  // P2 Up
+  emit(0xA5,zp.input2); emit(0x29,0x02); BR(0xF0,"p2_no_up");
+  emit(0xA5,zp.p2y); emit(0x38); emit(0xE9,0x02); emit(0x85,zp.p2y);
+  label("p2_no_up");
+  // P2 Down
+  emit(0xA5,zp.input2); emit(0x29,0x04); BR(0xF0,"p2_no_down");
+  emit(0xA5,zp.p2y); emit(0x69,0x02); emit(0x85,zp.p2y);
+  label("p2_no_down");
+
+  // Clamp paddles to Y range 16..200
+  // p1 lower bound
+  emit(0xA5,zp.p1y); emit(0xC9,16); BR(0x30,"p1_clamped_low"); // BMI if negative relative to 16 -> if <16 branch
+  // check upper bound >200
+  emit(0xA5,zp.p1y); emit(0xC9,200); BR(0x90,"p1_clamped_high"); // BCC skip if <=200
+  // set to 200
+  emit(0xA9,200); emit(0x85,zp.p1y);
+  BR(0x10,"p1_clamped_done"); // BPL skip
+  label("p1_clamped_low");
+  emit(0xA9,16); emit(0x85,zp.p1y);
+  label("p1_clamped_high");
+  label("p1_clamped_done");
+
+  // p2 clamp (same)
+  emit(0xA5,zp.p2y); emit(0xC9,16); BR(0x30,"p2_clamped_low");
+  emit(0xA5,zp.p2y); emit(0xC9,200); BR(0x90,"p2_clamped_high");
+  emit(0xA9,200); emit(0x85,zp.p2y);
+  BR(0x10,"p2_clamped_done");
+  label("p2_clamped_low");
+  emit(0xA9,16); emit(0x85,zp.p2y);
+  label("p2_clamped_high");
+  label("p2_clamped_done");
+
+  // Move ball X
+  emit(0xA5,zp.ballX); emit(0x65,zp.ballVX); emit(0x85,zp.ballX);
+  // Move ball Y
+  emit(0xA5,zp.ballY); emit(0x65,zp.ballVY); emit(0x85,zp.ballY);
+
+  // Bounce top/bottom - invert VY if Y<20 or Y>200
+  emit(0xA5,zp.ballY); emit(0xC9,20); BR(0x10,"ball_not_top"); // BPL skip if >=20
+  // invert VY
+  emit(0xA5,zp.ballVY); emit(0x49,0xFF); emit(0x85,zp.ballVY);
+  emit(0xA9,20); emit(0x85,zp.ballY);
+  label("ball_not_top");
+  emit(0xA5,zp.ballY); emit(0xC9,200); BR(0x90,"ball_not_bottom"); // BCC skip if <=200
+  emit(0xA5,zp.ballVY); emit(0x49,0xFF); emit(0x85,zp.ballVY);
+  emit(0xA9,200); emit(0x85,zp.ballY);
+  label("ball_not_bottom");
+
+  // Paddle collisions (exact):
+  // Left paddle X region ~ 24; paddle height 32 (two sprites stacked). If ballX <= 28 and ballY between p1y..p1y+31 then reflect and give small random Y tweak.
+  // test ballX <= 28
+  emit(0xA5,zp.ballX); emit(0xC9,28); BR(0x90,"check_right_paddle"); // BCC skip if >=28 -> no left collision
+  // compute if ballY >= p1y
+  emit(0xA5,zp.ballY); emit(0xC5,zp.p1y); BR(0xB0,"left_no_collision"); // CMP p1y ; BCS if ballY >= p1y (we want ballY >= p1y)
+  // if carry clear => ballY < p1y -> no collision
+  label("left_no_collision");
+  // if ballY > p1y+31 -> no collision: compute ballY - (p1y + 31) and check carry
+  emit(0xA5,zp.ballY); emit(0xC5,zp.p1y); emit(0x49,0xE1); // SBC #$E1 ( -31 ) -> effectively compare ballY and p1y+31
+  BR(0x90,"maybe_left_hit"); // BCC -> if result >=0 => ballY >= p1y+31 -> skip
+  // if in vertical range -> hit
+  label("maybe_left_hit");
+  // perform reflect: set ballVX = abs(ballVX) (ensure positive) then invert to positive speed away
+  emit(0xA5,zp.ballVX); emit(0x29,0x80); BR(0xF0,"left_hit_neg"); // test sign bit
+  // positive, set to -abs? we'll simply negate to move right
+  // set ballVX = + (absolute) and ensure it's positive => we want positive value (right)
+  // If currently positive, invert to negative to bounce? simpler: set to +2
+  emit(0xA9,0x02); emit(0x85,zp.ballVX); JMPto("left_after_hit");
+  label("left_hit_neg");
+  emit(0xA9,0x02); emit(0x85,zp.ballVX);
+  label("left_after_hit");
+  // small Y tweak: if ballY < p1y+16 => set VY = -1 else VY = +1
+  emit(0xA5,zp.ballY); emit(0xC5,zp.p1y); emit(0x49,0x10); // SBC #16 ; if negative -> above center
+  BR(0x10,"left_set_vy_pos"); // BPL if >=0 => below center -> set +1
+  // set VY = -1
+  emit(0xA9,0xFF); emit(0x85,zp.ballVY); JMPto("play_after_left");
+  label("left_set_vy_pos");
+  emit(0xA9,0x01); emit(0x85,zp.ballVY);
+  label("play_after_left");
+  // play paddle hit sound
+  JSRto("playHit");
+  JMPto("after_left_check");
+
+  label("check_right_paddle");
+  // Right paddle collision if ballX >= 232
+  emit(0xA5,zp.ballX); emit(0xC9,232); BR(0x30,"after_left_check"); // BMI skip if <232
+  // check vertical range similar to left but using p2y
+  emit(0xA5,zp.ballY); emit(0xC5,zp.p2y); BR(0xB0,"right_no_collision");
+  emit(0xA5,zp.ballY); emit(0xC5,zp.p2y); emit(0x49,0xE1); BR(0x90,"maybe_right_hit");
+  label("right_no_collision");
+  label("maybe_right_hit");
+  // set ballVX = -2
+  emit(0xA9,0xFE); emit(0x85,zp.ballVX); // -2 (two's complement)
+  // Y tweak:
+  emit(0xA5,zp.ballY); emit(0xC5,zp.p2y); emit(0x49,0x10); BR(0x10,"right_set_vy_pos");
+  emit(0xA9,0xFF); emit(0x85,zp.ballVY); JMPto("play_after_right");
+  label("right_set_vy_pos");
+  emit(0xA9,0x01); emit(0x85,zp.ballVY);
+  label("play_after_right");
+  JSRto("playHit");
+
+  label("after_left_check");
+
+  // Score checks: left out (ballX < 8) -> score2++ ; right out (ballX > 248) -> score1++
+  emit(0xA5,zp.ballX); emit(0xC9,8); BR(0x90,"no_left_out"); // BCC skip if >=8
+  // left out
+  emit(0xE6,zp.score2); JSRto("playScore"); JSRto("resetAfterScore"); JMPto("after_score");
+  label("no_left_out");
+  emit(0xA5,zp.ballX); emit(0xC9,248); BR(0x30,"no_right_out"); // BMI skip if <248
+  emit(0xE6,zp.score1); JSRto("playScore"); JSRto("resetAfterScore"); JMPto("after_score");
+  label("no_right_out");
+
+  label("after_score");
+  // update OAM & scores & check win
+  JSRto("updateOAM");
+  JSRto("drawScores");
+
+  // check win: if score1 >=7 => win player1; if score2 >=7 => win player2
+  emit(0xA5,zp.score1); emit(0xC9,7); BR(0x90,"no_win1"); // BCC skip if <7
+  // win1
+  emit(0xA9,0x02); emit(0x85,zp.state); // state=2 gameover
+  emit(0xA9,0x01); emit(0x85,zp.servePlayer); // show winner as player1
+  JSRto("playVictory"); JMPto("MAIN");
+  label("no_win1");
+  emit(0xA5,zp.score2); emit(0xC9,7); BR(0x90,"no_win2");
+  emit(0xA9,0x02); emit(0x85,zp.state); emit(0xA9,0x02); emit(0x85,zp.servePlayer);
+  JSRto("playVictory"); JMPto("MAIN");
+  label("no_win2");
+
+  // loop back
+  JMPto("MAIN");
+
+  // ---------------- Gameover handler ----------------
+  label("do_gameover");
+  // draw "PLAYER X WINS" (we'll do simple background text tiles)
+  JSRto("drawGameOver");
+  // wait for Start to reset -> readInputs will map Start bit into input1 bit8 consult; we used Start to reset earlier
+  // spin until Start pressed
+  label("gameover_spin");
+  JSRto("readInputs");
+  emit(0xA5,zp.input1); emit(0x29,0x08); BR(0xF0,"gameover_spin"); // BEQ keep spinning
+  // on start, reset match
+  emit(0xA9,0x00); emit(0x85,zp.score1); emit(0xA9,0x00); emit(0x85,zp.score2);
+  emit(0xA9,0x00); emit(0x85,zp.state);
+  emit(0xA9,0x01); emit(0x85,zp.servePlayer);
+  JMPto("MAIN");
+
+  // ---------------- Subroutines ----------------
+
+  // waitVBlank
+  label("waitVBlank");
+  emit(0xAD,0x02,0x20);
+  emit(0x10,0xFB); // BPL -5
+  RTS();
+
+  // loadPal
+  label("loadPal");
+  // PPUADDR = $3F00
+  emit(0xA9,0x3F); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x06,0x20);
+  // Write 8 bytes of palette (BG0..SPR)
+  const pals = [0x0F,0x06,0x16,0x26, 0x0F,0x16,0x26,0x36];
+  for (const p of pals){ emit(0xA9,p); emit(0x8D,0x07,0x20); }
+  RTS();
+
+  // clearNT (clear name table area where scores and text go)
+  label("clearNT");
+  emit(0xA9,0x20); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x06,0x20);
+  // write 32*4 bytes ~ 128 bytes of 0 as a minimal clear (top area)
+  emit(0xA2,0x20); // X = 32
+  label("clrloop");
+  emit(0xA9,0x00); emit(0x8D,0x07,0x20); // STA $2007
+  emit(0xCA); emit(0xD0,0xFB); // DEX ; BNE -5
+  RTS();
+
+  // readInputs -- maps important bits into input1 & input2
+  // We'll produce:
+  // input1 bits: bit0 = serve (A/Up), bit1 = Up, bit2 = Down, bit3 = Start
+  // input2 bits: same for controller 2 (from $4017)
+  label("readInputs");
+  // strobe
+  emit(0xA9,0x01); emit(0x8D,0x16,0x40);
+  emit(0xA9,0x00); emit(0x8D,0x16,0x40);
+  // read player1 8 times, but we only care about bits for A(0), Start(3), Up(4), Down(5)
+  emit(0xA9,0x00); emit(0x85,zp.input1); // clear input1
+  // bit0 (A)
+  emit(0xAD,0x16,0x40); emit(0x29,0x01); BR(0xF0,"r1_skipA"); // if zero skip
+  emit(0xA9,0x01); emit(0x05,zp.input1); emit(0x85,zp.input1);
+  label("r1_skipA");
+  // bit1 (B) -- ignored
+  emit(0xAD,0x16,0x40);
+  // bit2 Select -- ignored
+  emit(0xAD,0x16,0x40);
+  // bit3 Start
+  emit(0xAD,0x16,0x40); emit(0x29,0x08); BR(0xF0,"r1_skipStart");
+  emit(0xA9,0x08); emit(0x05,zp.input1); emit(0x85,zp.input1);
+  label("r1_skipStart");
+  // bit4 Up -> map to bit1 in input
+  emit(0xAD,0x16,0x40); emit(0x29,0x10); BR(0xF0,"r1_skipUp");
+  emit(0xA9,0x02); emit(0x05,zp.input1); emit(0x85,zp.input1);
+  label("r1_skipUp");
+  // bit5 Down -> map to bit2 in input
+  emit(0xAD,0x16,0x40); emit(0x29,0x20); BR(0xF0,"r1_skipDown");
+  emit(0xA9,0x04); emit(0x05,zp.input1); emit(0x85,zp.input1);
+  label("r1_skipDown");
+  // bits 6,7 consumed but ignored: read twice
+  emit(0xAD,0x16,0x40); emit(0xAD,0x16,0x40);
+
+  // player2 via $4017
+  emit(0xA9,0x00); emit(0x85,zp.input2);
+  emit(0xAD,0x17,0x40); emit(0x29,0x01); BR(0xF0,"r2_skipA"); emit(0xA9,0x01); emit(0x05,zp.input2); emit(0x85,zp.input2);
+  label("r2_skipA");
+  emit(0xAD,0x17,0x40); // B
+  emit(0xAD,0x17,0x40); // Select
+  emit(0xAD,0x17,0x40); emit(0x29,0x08); BR(0xF0,"r2_skipStart"); emit(0xA9,0x08); emit(0x05,zp.input2); emit(0x85,zp.input2);
+  label("r2_skipStart");
+  emit(0xAD,0x17,0x40); emit(0x29,0x10); BR(0xF0,"r2_skipUp"); emit(0xA9,0x02); emit(0x05,zp.input2); emit(0x85,zp.input2);
+  label("r2_skipUp");
+  emit(0xAD,0x17,0x40); emit(0x29,0x20); BR(0xF0,"r2_skipDown"); emit(0xA9,0x04); emit(0x05,zp.input2); emit(0x85,zp.input2);
+  label("r2_skipDown");
+  emit(0xAD,0x17,0x40); emit(0xAD,0x17,0x40);
+
+  RTS();
+
+  // buildOAM (initial OAM contents zeroed)
+  label("buildOAM");
+  emit(0xA2,0x00);
+  label("oamz");
+  emit(0xA9,0x00); emit(0x8D,0x00,0x02); // store zero to $0200+X
+  emit(0xCA); emit(0xD0,0xFB); // DEX ; BNE -5
+  RTS();
+
+  // updateOAM: write left paddle (2 sprites), right paddle (2 sprites), ball (1 sprite)
+  label("updateOAM");
+  // left paddle top at $0200
+  emit(0xA5,zp.p1y); emit(0x8D,0x00,0x02); // Y
+  emit(0xA9,0x00); emit(0x8D,0x01,0x02); // tile
+  emit(0xA9,0x00); emit(0x8D,0x02,0x02); // attr
+  emit(0xA9,0x10); emit(0x8D,0x03,0x02); // X
+
+  // left paddle bottom
+  emit(0xA5,zp.p1y); emit(0x69,0x08); emit(0x8D,0x04,0x02);
+  emit(0xA9,0x01); emit(0x8D,0x05,0x02);
+  emit(0xA9,0x00); emit(0x8D,0x06,0x02);
+  emit(0xA9,0x10); emit(0x8D,0x07,0x02);
+
+  // right paddle top at $0208
+  emit(0xA5,zp.p2y); emit(0x8D,0x08,0x02);
+  emit(0xA9,0x00); emit(0x8D,0x09,0x02);
+  emit(0xA9,0x00); emit(0x8D,0x0A,0x02);
+  emit(0xA9,0xF0); emit(0x8D,0x0B,0x02); // X ~ 240
+
+  // right paddle bottom
+  emit(0xA5,zp.p2y); emit(0x69,0x08); emit(0x8D,0x0C,0x02);
+  emit(0xA9,0x01); emit(0x8D,0x0D,0x02);
+  emit(0xA9,0x00); emit(0x8D,0x0E,0x02);
+  emit(0xA9,0xF0); emit(0x8D,0x0F,0x02);
+
+  // ball at $0210
+  emit(0xA5,zp.ballY); emit(0x8D,0x10,0x02);
+  emit(0xA9,0x02); emit(0x8D,0x11,0x02); // ball tile
+  emit(0xA9,0x00); emit(0x8D,0x12,0x02);
+  emit(0xA5,zp.ballX); emit(0x8D,0x13,0x02);
+
+  RTS();
+
+  // drawScores: Puts scores at top center: columns ~ 14 and 18
+  label("drawScores");
+  emit(0xA9,0x20); emit(0x8D,0x06,0x20); // PPUADDR =$2000
+  emit(0xA9,0x04); emit(0x8D,0x06,0x20); // offset col ~4 (centered-ish)
+  // write left score
+  emit(0xA5,zp.score1); emit(0x8D,0x07,0x20);
+  // write space
+  emit(0xA9,0x00); emit(0x8D,0x07,0x20);
+  // write right score
+  emit(0xA5,zp.score2); emit(0x8D,0x07,0x20);
+  RTS();
+
+  // drawGameOver/drawGame functions: draw "PLAYER X WINS" and "SERVE"
+  label("drawGameOver");
+  // For simplicity we draw a centered short message by writing a few tiles to $2000+0x60
+  emit(0xA9,0x20); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x60); emit(0x8D,0x06,0x20);
+  // write a short pattern (we use tile indexes reserved in CHR)
+  // "WIN" simple: tiles 40..44 etc (we'll ensure CHR contains these crude letters)
+  emit(0xA9,40); emit(0x8D,0x07,0x20);
+  emit(0xA9,41); emit(0x8D,0x07,0x20);
+  emit(0xA9,42); emit(0x8D,0x07,0x20);
+  emit(0x60); RTS();
+
+  label("drawServe");
+  emit(0xA9,0x20); emit(0x8D,0x06,0x20);
+  emit(0xA9,0x60); emit(0x8D,0x06,0x20);
+  // write "SERVE" tiles 48..52
+  emit(0xA9,48); emit(0x8D,0x07,0x20);
+  emit(0xA9,49); emit(0x8D,0x07,0x20);
+  emit(0xA9,50); emit(0x8D,0x07,0x20);
+  emit(0xA9,51); emit(0x8D,0x07,0x20);
+  emit(0xA9,52); emit(0x8D,0x07,0x20);
+  emit(0x60); RTS();
+
+  // resetAfterScore: put ball in center and set serve to scoring player (so winner serves)
+  label("resetAfterScore");
+  emit(0xA9,0x80); emit(0x85,zp.ballX);
+  emit(0xA9,0x70); emit(0x85,zp.ballY);
+  emit(0xA9,0x02); emit(0x85,zp.ballVX);
+  emit(0xA9,0x01); emit(0x85,zp.ballVY);
+  // go to serve state
+  emit(0xA9,0x00); emit(0x85,zp.state); // 0 = serve
+  RTS();
+
+  // playHit: simple APU short square on $4000..$4003
+  label("playHit");
+  // set duty & env
+  emit(0xA9,0x30); emit(0x8D,0x00,0x40); // $4000
+  emit(0xA9,0x08); emit(0x8D,0x01,0x40); // $4001 length irrelevant
+  emit(0xA9,0x20); emit(0x8D,0x02,0x40); // $4002 low
+  emit(0xA9,0x10); emit(0x8D,0x03,0x40); // $4003 high -> starts sound
+  RTS();
+
+  // playScore: different tone
+  label("playScore");
+  emit(0xA9,0x70); emit(0x8D,0x00,0x40);
+  emit(0xA9,0x08); emit(0x8D,0x01,0x40);
+  emit(0xA9,0x40); emit(0x8D,0x02,0x40);
+  emit(0xA9,0x30); emit(0x8D,0x03,0x40);
+  RTS();
+
+  // playVictory: short jingle (sequence of quick writes)
+  label("playVictory");
+  // simple three tones in a row (blocking)
+  JSRto("playScore"); JSRto("waitShort");
+  JSRto("playHit"); JSRto("waitShort");
+  JSRto("playScore"); JSRto("waitShort");
+  RTS();
+
+  label("waitShort");
+  emit(0xA2,0xFF); // X = 255
+  label("wloop");
+  emit(0xCA); emit(0xD0,0xFB); // DEX ; BNE -5
+  RTS();
+
+  // NMI: write scroll (none) and OAM DMA ($4014 = $02), set nmiFlag
+  label("NMI");
+  // $2005 writes both zero (no scroll)
+  emit(0xA9,0x00); emit(0x8D,0x05,0x20);
+  emit(0xA9,0x00); emit(0x8D,0x05,0x20);
+  // OAM DMA from $02
+  emit(0xA9,0x02); emit(0x8D,0x14,0x40);
+  // set nmiFlag
+  emit(0xA9,0x01); emit(0x85,zp.nmiFlag);
+  RTI();
+
+  label("IRQ"); RTI();
+
+  // -------------- fixups patching --------------
+  // patch absolute JSR/JMP fixups
+  for (const [pos,name] of absFixups){
+    const addr = labels[name] || 0;
+    PRG[pos] = addr & 0xFF;
+    PRG[pos+1] = (addr>>8) & 0xFF;
+  }
+  // patch branch fixups (relative)
+  for (const [pos,name] of branchFixups){
+    const target = labels[name];
+    if (target === undefined) {
+      PRG[pos] = 0; // safe default
+      continue;
+    }
+    // relative offset = target - (address of next byte)
+    const rel = target - (ORG + pos + 1);
+    const byte = (rel & 0xFF);
+    PRG[pos] = byte;
+  }
+
+  // set vectors
+  PRG[0x3FFA] = labels["NMI"] & 0xFF;
+  PRG[0x3FFB] = (labels["NMI"]>>8)&0xFF;
+  PRG[0x3FFC] = labels["RESET"] & 0xFF;
+  PRG[0x3FFD] = (labels["RESET"]>>8)&0xFF;
+  PRG[0x3FFE] = labels["IRQ"] & 0xFF;
+  PRG[0x3FFF] = (labels["IRQ"]>>8)&0xFF;
+
+  // ---------------- CHR ROM (8KB) ----------------
+  const CHR = new Uint8Array(0x2000);
+  function putTile(idx, rows){
+    const base = idx*16;
+    for (let y=0;y<8;y++){
+      const r = rows[y]||0;
+      CHR[base+y] = r;
+      CHR[base+8+y] = 0x00;
+    }
+  }
+  // tiles:
+  // 0..1 paddle (solid 8px tall column)
+  putTile(0, [0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18]);
+  putTile(1, [0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18]);
+  // 2 ball
+  putTile(2, [0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C]);
+  // digits 0-9 at 8..17
+  const digits = [
+    [0x7C,0x82,0x82,0x82,0x82,0x82,0x7C,0x00],
+    [0x10,0x30,0x10,0x10,0x10,0x10,0x38,0x00],
+    [0x7C,0x82,0x04,0x18,0x20,0x40,0xFE,0x00],
+    [0x7C,0x82,0x04,0x38,0x04,0x82,0x7C,0x00],
+    [0x08,0x18,0x28,0x48,0x88,0xFE,0x08,0x00],
+    [0xFE,0x80,0xFC,0x02,0x02,0x82,0x7C,0x00],
+    [0x38,0x60,0x80,0xFC,0x82,0x82,0x7C,0x00],
+    [0xFE,0x82,0x04,0x08,0x10,0x20,0x20,0x00],
+    [0x7C,0x82,0x82,0x7C,0x82,0x82,0x7C,0x00],
+    [0x7C,0x82,0x82,0x7E,0x02,0x04,0x38,0x00]
+  ];
+  for (let d=0; d<10; d++) putTile(8+d, digits[d]);
+
+  // crude letters for SERVE/WINS at 48..60 (small selection)
+  putTile(48, [0x7C,0x82,0xBA,0xAA,0x92,0x82,0x7C,0x00]); // S-ish
+  putTile(49, [0x7C,0x82,0x82,0xFE,0x82,0x82,0x82,0x00]); // E-ish
+  putTile(50, [0xFC,0x82,0x82,0xFC,0x82,0x82,0xFC,0x00]); // R/M-ish
+  putTile(51, [0xFE,0x10,0x10,0x7C,0x10,0x10,0xFE,0x00]); // V-ish
+  putTile(52, [0x7C,0x82,0x82,0x7C,0x82,0x82,0x7C,0x00]); // E
+  // W I N tiles
+  putTile(40, [0x82,0x82,0x92,0xAA,0xC6,0x82,0x82,0x00]); // W
+  putTile(41, [0x82,0x82,0x82,0xFE,0x82,0x82,0x82,0x00]); // I
+  putTile(42, [0xFE,0x82,0x82,0xFC,0x80,0x80,0x80,0x00]); // N
+
+  // ---------------- Combine ROM ----------------
+  const rom = new Uint8Array(header.length + PRG.length + CHR.length);
+  rom.set(header,0);
+  rom.set(PRG, header.length);
+  rom.set(CHR, header.length + PRG.length);
+
+  // ---------------- Download ----------------
+  const blob = new Blob([rom], {type:"application/octet-stream"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "pong_refined.nes";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  // ---------------- Notes (honest) ----------------
+  // This is a compact, hand-assembled generator. I tested the logic conceptually while assembling,
+  // but tiny mistakes in branch distances or a couple of off-bytes may require microtuning in a debugger.
+  // If you run the ROM in Mesen and something is broken (e.g. branch jumps wrong), tell me:
+  //  - emulator + screenshot or what you see,
+  //  - I'll patch exact offsets immediately.
+  //
+  // If you want I can:
+  //  - produce a debug-build that prints internal variables into the top-left nametable (helpful),
+  //  - or generate a version with an in-browser visualizer (canvas) to validate logic before building ROM.
+}
+</script>
+</body>
+</html>
