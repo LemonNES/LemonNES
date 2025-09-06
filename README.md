@@ -7,9 +7,7 @@
 
 
 # Browser Based NES Emulator
-LemonNES is a simple NES Emulator coded in html, css, and javascript. 
-
-built with help from ChatGPT
+LemonNES Is A Simple, Lightweight NES Emulator Coded In HTML, CSS, And JavaScript. 
 
 # Known Issues
 
