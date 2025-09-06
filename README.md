@@ -6,7 +6,7 @@
 </h1> 
 
 
-# LemonNES: Browser Based NES Emulator
+# Browser Based NES Emulator
 LemonNES is a simple NES Emulator coded in html, css, and javascript. 
 
 built with help from ChatGPT
