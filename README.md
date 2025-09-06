@@ -1,9 +1,5 @@
 <h1 align="center">
-  <img src=""https://avatars.githubusercontent.com/u/229016701?v=4 height="150px">
-  <br><br>
-  <img src="https://avatars.githubusercontent.com/u/229016701?v=4" width="100">
-  <a href="">
-    <img src="https://avatars.githubusercontent.com/u/229016701?v=4" width="150">
+    <img src="https://avatars.githubusercontent.com/u/229016701?v=4" width="300">
   </a>
   <br><br>
   LemonNES
