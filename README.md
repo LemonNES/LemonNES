@@ -1,4 +1,10 @@
-# LemonNES: Browser Based NES Emulator
+<table align="center">
+    <tr>
+        <td align="center" width="25%">
+            <img src="https://avatars.githubusercontent.com/u/229016701?v=4" alt="LemonNES" >
+        </td>
+        <td align="center" width="75%">
+         # LemonNES: Browser Based NES Emulator
 LemonNES is a simple NES Emulator coded in html, css, and javascript. 
 
 built with help from ChatGPT
