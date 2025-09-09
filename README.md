@@ -26,9 +26,7 @@ The Following Games Have Been Tested With LemonNES
 
 • Exitebike - Playable But With Moderate Graphical Issues And Scrolling Bugs
 
-• Bubble Bobble - Playable But With Severe Graphical Issues
-
-• Bubble Bobble - Boots But With Severe Graphical Issues And Not Playable
+• Bubble Bobble - Boots But With Extreme Graphical Issues
 
 • Donkey Kong - Playable But With Major Graphical Issues
 
@@ -40,6 +38,9 @@ The Following Games Have Been Tested With LemonNES
 
 # Beta
 LemonNES Is Currently In Beta, If You Find Any Issues With The Code, Please Report Them By Creating A Pull Request.
+
+# Testing 
+To Test A Working Version Of LemonNES, Visit https://lemonnes.github.io/LemonNES
 
 # Disclaimer
  NES is a trademark of Nintendo. LemonNES isn't associated with Nintendo in any way.
