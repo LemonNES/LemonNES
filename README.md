@@ -43,4 +43,6 @@ LemonNES Is Currently In Beta, If You Find Any Issues With The Code, Please Repo
 To Test A Working Version Of LemonNES, Visit https://lemonnes.github.io/LemonNES
 
 # Disclaimer
- NES is a trademark of Nintendo. LemonNES isn't associated with Nintendo in any way.
+This software should not be used to run pirated content. LemonNES should NEVER be used to run pirated content.
+
+NES is a trademark of Nintendo. LemonNES isn't associated with Nintendo in any way.
