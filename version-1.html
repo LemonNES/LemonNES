@@ -184,8 +184,69 @@
 
 <script>
 (() => {
-  const BUILD = new Date().toISOString().replace('T',' ').slice(0,19);
-  document.getElementById('build').textContent = `build ${BUILD}`;
+const BUILD = new Date().toISOString().replace('T',' ').slice(0,19);
+document.getElementById('build').textContent = `build ${BUILD}`;
+
+
+// ===== Emulator global =====
+let nes = null;
+let running = false;
+
+
+const romInput = document.getElementById('rom');
+const runBtn = document.getElementById('btnRun');
+const pauseBtn = document.getElementById('btnPause');
+const resetBtn = document.getElementById('btnReset');
+const romName = document.getElementById('romName');
+
+
+// ===== Hook ROM loader =====
+romInput.addEventListener('change', e => {
+const file = e.target.files[0];
+if (!file) return;
+romName.textContent = file.name;
+const reader = new FileReader();
+reader.onload = () => {
+try {
+const bytes = new Uint8Array(reader.result);
+const cart = new Cartridge(bytes);
+const ppu = new PPU();
+ppu.attachCanvas(document.getElementById('screen'));
+ppu.connectCart(cart);
+const cpu = new CPU6502();
+const apu = new APU();
+const input = new Controllers();
+const bus = new Bus(cpu, ppu, cart, input, apu);
+cpu.bus = bus;
+nes = { cpu, ppu, apu, bus, cart, input };
+
+
+runBtn.disabled = false;
+pauseBtn.disabled = false;
+resetBtn.disabled = false;
+} catch (err) {
+alert("Failed to load ROM: " + err.message);
+}
+};
+reader.readAsArrayBuffer(file);
+});
+
+
+// ===== Run loop =====
+function frame() {
+if (!running || !nes) return;
+for (let i = 0; i < 29781; i++) {
+nes.cpu.step();
+nes.ppu.step();
+nes.apu.step(1);
+}
+requestAnimationFrame(frame);
+}
+
+
+runBtn.addEventListener('click', () => {
+if (!nes) return;
+});
 
   // ===== Utilities =====
   const clamp=(v,min,max)=>v<min?min:v>max?max:v;
