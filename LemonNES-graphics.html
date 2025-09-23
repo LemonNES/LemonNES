@@ -1025,16 +1025,18 @@
         : bgPx
         ? colorIndex
         : this.palette[0];
-    const rgb = NTSC_PALETTE[cindex & 0x3f];
-    let [rGamma, gGamma, bGamma] = applyGamma(rgb[0], rgb[1], rgb[2]);
-    function applyGamma(r, g, b) {
+    const rgb = NTSC_PALETTE[cindex & 0x3f]; 
+    for (let i = 0; i < palette.length; i++) {
+  let [r, g, b] = palette[i];
+  palette[i] = applyGamma(r, g, b).map(v => Math.round(v));
+} let [rGamma, gGamma, bGamma] = applyGamma(rgb[0], rgb[1], rgb[2]);
+    function applyGamma(r, g, b, gamma = 2.0) {
   return [
-    Math.pow(r / 255, 1 / 2.2) * 255,
-    Math.pow(g / 255, 1 / 2.2) * 255,
-    Math.pow(b / 255, 1 / 2.2) * 255
+    Math.pow(r / 255, 1 / gamma) * 255,
+    Math.pow(g / 255, 1 / gamma) * 255,
+    Math.pow(b / 255, 1 / gamma) * 255
   ];
-}
-
+})
 img[idx] = rGamma;
 img[idx + 1] = gGamma;
 img[idx + 2] = bGamma;
