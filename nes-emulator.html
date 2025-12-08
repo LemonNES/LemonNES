@@ -849,29 +849,6 @@
       const hi = this.ppuRead(addr+8);
       return {lo,hi,pal};
     }
-    evalSprites() {
-  // Evaluate which sprites are visible on the current scanline
-  const y = this.scanline;
-  this.spriteCount = 0;
-  this.spriteZeroInLine = false;
-  for(let i=0; i<64; i++) {
-    const o = i * 4;
-    const sy = this.oam[o];
-    const h = (this.ctrl & 0x20) ? 16 : 8; // sprite height
-    const row = y - sy;
-    if(row >= 0 && row < h && this.spriteCount < 8) {
-      if(i === 0) this.spriteZeroInLine = true;
-      // Copy OAM data into secondary OAM buffer
-      this.secOAM[this.spriteCount*4+0] = this.oam[o];
-      this.secOAM[this.spriteCount*4+1] = this.oam[o+1];
-      this.secOAM[this.spriteCount*4+2] = this.oam[o+2];
-      this.secOAM[this.spriteCount*4+3] = this.oam[o+3];
-      this.spriteCount++;
-      if(this.spriteCount === 8) {
-        this.status |= 0x20; // Set sprite overflow flag
-        break;
-      }
-    }
 
     // Sprite-0 hit fix: Only set hit if non-transparent sprite pixel overlaps non-transparent bg pixel
     renderPixel(x,y,bg,sp){
