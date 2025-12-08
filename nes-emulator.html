@@ -889,7 +889,47 @@
     }  
   }
   }
-
+write(addr, val) {
+    // Map all CPU writes for 0x2000-0x3FFF ($2000-$2007 mirrored every 8 bytes)
+    switch (addr & 0x2007) {
+      case 0x0000: this.ctrl = val; break;
+      case 0x0001: this.mask = val; break;
+      case 0x0003: this.oamaddr = val; break;
+      case 0x0004: this.oam[this.oamaddr++] = val; break;
+      case 0x0005:
+        // Handle scroll register logic here!
+        // Example:
+        if(this.w === 0) {
+          this.x = val & 0x07;
+          this.t = (this.t & 0x7FE0) | (val >> 3);
+          this.w = 1;
+        } else {
+          this.t = (this.t & 0x0C1F) | ((val & 0x07) << 12) | ((val & 0xF8) << 2);
+          this.w = 0;
+        }
+        break;
+      case 0x0006:
+        // Handle address register logic here!
+        if(this.w === 0) {
+          this.t = (this.t & 0x00FF) | ((val & 0x3F) << 8);
+          this.w = 1;
+        } else {
+          this.t = (this.t & 0x7F00) | val;
+          this.v = this.t;
+          this.w = 0;
+        }
+        break;
+      case 0x0007:
+        // Handle data port writes (VRAM/palette/CHR/etc)
+        this.ppuWrite(this.v, val);
+        this.v += (this.ctrl & 0x04) ? 32 : 1;
+        this.v &= 0x7FFF;
+        break;
+      default:
+        // Ignore other writes
+        break;
+    }
+  }
   // [UI, NES main loop unchanged - only Mapper fixes above]
   // Make sure your NES class calls connectCart and updates the UI.
 // ===== 6502 CPU (official opcodes only) =====  
