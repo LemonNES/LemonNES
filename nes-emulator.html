@@ -122,6 +122,10 @@
   </div>
 </div>
 <script>
+ window.onerror = function(msg, url, line, col, err) {
+  alert('FATAL ERROR: '+msg+'\nLine:'+line+'\n'+(err && err.stack?err.stack:''));
+  return false;
+}; 
 (() => {
   const BUILD = new Date().toISOString().replace('T',' ').slice(0,19);
   document.getElementById('build').textContent = `build ${BUILD}`;
