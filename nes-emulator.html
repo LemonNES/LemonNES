@@ -961,6 +961,55 @@
       }  
     }  
   }
+    ppuRead(addr) {
+  addr &= 0x3fff;
+  if (addr < 0x2000) return this.mapper.chrRead(addr);
+  if (addr < 0x3f00) return this.vram[this.ntIndex(addr)];
+  let palAddr = addr & 0x1f;
+  if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
+  return this.palette[palAddr];
+}
+ppuWrite(addr, val) {
+  addr &= 0x3fff;
+  val &= 0xff;
+  if (addr < 0x2000) this.mapper.chrWrite(addr, val);
+  else if (addr < 0x3f00) this.vram[this.ntIndex(addr)] = val;
+  else {
+    let palAddr = addr & 0x1f;
+    if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
+    this.palette[palAddr] = val;
+  }
+}
+copyY() {
+  this.v = (this.v & ~0x7be0) | (this.t & 0x7be0);
+}
+copyX() {
+  this.v = (this.v & ~0x041f) | (this.t & 0x041f);
+}
+incY() {
+  if ((this.v & 0x7000) !== 0x7000) this.v += 0x1000;
+  else {
+    this.v &= ~0x7000;
+    let y = (this.v & 0x03e0) >> 5;
+    if (y === 29) {
+      y = 0;
+      this.v ^= 0x0800;
+    } else if (y === 31) {
+      y = 0;
+    } else {
+      y++;
+    }
+    this.v = (this.v & ~0x03e0) | (y << 5);
+  }
+}
+incCoarseX() {
+  if ((this.v & 0x001f) === 31) {
+    this.v &= ~0x001f;
+    this.v ^= 0x0400;
+  } else {
+    this.v++;
+  }
+}
   
 evalSprites() {
   // Evaluate which sprites are visible on the current scanline
