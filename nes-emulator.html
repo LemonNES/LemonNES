@@ -745,7 +745,34 @@
       else                        this.mapper = new Mapper0(cart);
       this.mirror = this.mapper.mirroring;
     }
-       write(addr, val) {
+    read(addr) {
+  switch (addr & 0x2007) {
+    case 0x0002: // PPUSTATUS
+      // Return PPU status with proper read side effects
+      const res = this.status;
+      this.status &= ~0x80; // Clear vblank
+      this.w = 0;
+      return res;
+    case 0x0004: // OAMDATA
+      return this.oam[this.oamaddr];
+    case 0x0007: // PPUDATA
+      let value = this.ppuRead(this.v);
+      // Open-bus: buffered reads except for palette
+      if (this.v < 0x3F00) {
+        value = this.buffered;
+        this.buffered = this.ppuRead(this.v);
+      } else {
+        this.buffered = this.ppuRead(this.v - 0x1000);
+      }
+      this.v += (this.ctrl & 0x04) ? 32 : 1;
+      this.v &= 0x7fff;
+      return value;
+    default:
+      // Reading write-only registers or others returns open bus or status
+      return this.openBus || 0;
+  }
+}
+ write(addr, val) {
   // Only registers 0x2000-0x2007 (mirrored every 8 bytes)
   switch (addr & 0x2007) {
     case 0x0000: // PPUCTRL
