@@ -917,23 +917,41 @@
     this.v = (this.v & ~0x7be0) | (this.t & 0x7be0);
   }
   bgFetch() {
-    const nt = 0x2000 | (this.v & 0x0fff);
-    const at =
-      0x23c0 |
-      (this.v & 0x0c00) |
-      ((this.v >> 4) & 0x38) |
-      ((this.v >> 2) & 0x07);
-    const fineY = (this.v >> 12) & 7;
-    const tile = this.ppuRead(nt);
-    const attr = this.ppuRead(at);
-    const shift = ((this.v >> 4) & 4) | ((this.v >> 2) & 2);
-    const pal = ((attr >> shift) & 3) << 2;
-    const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
-    const addr = base + tile * 16 + fineY;
-    const lo = this.ppuRead(addr);
-    const hi = this.ppuRead(addr + 8);
-    return { lo, hi, pal };
-  }
+    // v = PPU address register containing nametable + coarse/fine scroll info
+    const v = this.v;
+
+    // Compute base addresses
+    const ntAddr   = 0x2000 | (v & 0x0FFF);            // Name table address
+    const atAddr   = 0x23C0 | (v & 0x0C00)             // Attribute table base
+                   | ((v >> 4) & 0x38)                 // coarse Y / 4
+                   | ((v >> 2) & 0x07);                // coarse X / 4
+
+    // Fetch tile index
+    const tileIndex = this.ppuRead(ntAddr);
+
+    // Fetch attribute byte
+    const attribute = this.ppuRead(atAddr);
+
+    const shift = ((v >> 4) & 4) | ((v >> 2) & 2);
+    const paletteHigh = (attribute >> shift) & 0x03;
+
+    // Determine pattern table for background tiles
+    const fineY = (v >> 12) & 0x07;
+    const basePattern = this.bgPatternTable << 12;
+
+    // Pattern table fetches
+    const patternAddr = basePattern | (tileIndex << 4) | fineY;
+    const lo = this.ppuRead(patternAddr);
+    const hi = this.ppuRead(patternAddr + 8);
+
+    // Return the latch for this 8-pixel unit
+    return {
+        lo: lo,
+        hi: hi,
+        palette: paletteHigh
+    };
+}
+
   evalSprites() {
     const y = this.scanline;
     this.spriteCount = 0;
@@ -964,66 +982,86 @@
       }
     }
   }
-  renderPixel(x, y, bg, sp) {
+  
+renderPixel() {
+    const x = this.cycle - 1;
+    const y = this.scanline;
+
+    if (y >= 240 || x < 0 || x >= 256) return;
+
+    // lookup pixel index in output ImageData
     const idx = (y * 256 + x) * 4;
-    const img = this.output.data;
-    let colorIndex = 0;
-    let bgPx = 0;
-    if (this.mask & 0x08) {
-      const bit = 7 - ((x + this.x) & 7);
-      bgPx = ((bg.hi >> bit) & 1) << 1 | ((bg.lo >> bit) & 1);
-      colorIndex = bgPx ? (0x10 + bg.pal + bgPx) : 0;
+
+    // Background enabled?
+    let bgColorIndex = 0;
+
+    if (this.showBackground) {
+        const bit = 7 - this.fineX;
+        const lo = (this.bgShiftLo >> bit) & 1;
+        const hi = (this.bgShiftHi >> bit) & 1;
+        const palette = this.bgLatch.palette;
+
+        bgColorIndex = (palette << 2) | (hi << 1) | lo;
     }
-    let spriteOpaque = 0,
-      spritePriority = 0,
-      spritePalette = 0,
-      sprite0 = false,
-      spPx = 0;
-    if (this.mask & 0x10) {
-      for (let i = 0; i < this.spriteCount; i++) {
-        const o = i * 4;
-        const sy = this.secOAM[o];
-        const tile = this.secOAM[o + 1];
-        const attr = this.secOAM[o + 2];
-        const sx = this.secOAM[o + 3];
-        const h = 8;
-        const row = y - sy;
-        if (x < sx || x >= sx + 8 || row < 0 || row >= h) continue;
-        const flipV = (attr >> 7) & 1,
-          flipH = (attr >> 6) & 1;
-        const palette = ((attr & 3) + 4) << 2;
-        spritePriority = (attr >> 5) & 1;
-        if (this.spriteZeroInLine && i === 0) sprite0 = true;
-        const fineY = flipV ? (7 - row) : row;
-        const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
-        const addr = base + tile * 16 + fineY;
-        const lo = this.ppuRead(addr);
-        const hi = this.ppuRead(addr + 8);
-        const bit = flipH ? (x - sx) : (7 - (x - sx));
-        spPx = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
-        if (spPx) {
-          spriteOpaque = 1;
-          spritePalette = palette;
-          break;
+
+    // Sprite pixel
+    let spriteColorIndex = 0;
+    let spriteOpaque = false;
+    let spritePriority = 0;
+
+    if (this.showSprites) {
+        const s = this.spriteLine[x];
+
+        if (s) {
+            spriteColorIndex = s.color & 0x03;
+            spritePriority = s.priority;
+
+            // sprite opaque = non-transparent pixel
+            spriteOpaque = (spriteColorIndex !== 0);
+
+            // add sprite palette number (bits 2-3)
+            spriteColorIndex |= (s.palette << 2);
         }
-      }
     }
-    if (spriteOpaque && bgPx && sprite0 && x < 255) {
-      this.status |= 0x40;
+
+    // Determine final pixel according to NES rules
+    let finalIndex = 0;
+
+    const bgOpaque = (bgColorIndex & 0x03) !== 0;
+
+    if (!bgOpaque && spriteOpaque) {
+        // sprite only
+        finalIndex = 0x10 | spriteColorIndex;
+    } else if (bgOpaque && spriteOpaque) {
+        // both present → priority decides
+        if (spritePriority === 0) {
+            finalIndex = 0x10 | spriteColorIndex;
+        } else {
+            finalIndex = bgColorIndex;
+        }
+
+        // Sprite 0 hit detection (correct timing)
+        if (s && s.sprite0 && x < 255) {
+            this.status |= 0x40;
+        }
+
+    } else {
+        // BG only or backdrop
+        finalIndex = bgColorIndex;
     }
-    const cindex =
-      spriteOpaque && (!spritePriority || bgPx === 0)
-        ? 0x10 + spritePalette + spPx
-        : bgPx
-        ? colorIndex
-        : this.palette[0];
-    const rgb = NTSC_PALETTE[cindex & 0x3f];
-    img[idx] = rgb[0];
-    img[idx + 1] = rgb[1];
-    img[idx + 2] = rgb[2];
-    img[idx + 3] = 255;
-  }
-  step() {
+
+    // Resolve final palette index
+    const paletteAddr = 0x3F00 + (finalIndex & 0x1F);
+    const c = NTSC_PALETTE[this.ppuRead(paletteAddr) & 0x3F];
+
+    // Write to output buffer
+    this.output.data[idx]     = c[0];
+    this.output.data[idx + 1] = c[1];
+    this.output.data[idx + 2] = c[2];
+    this.output.data[idx + 3] = 255;
+}
+
+  
     // Odd-frame cycle skip
     if (
       this.scanline === 261 &&
