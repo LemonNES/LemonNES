@@ -98,7 +98,29 @@
   </aside>
 </div>
 <!-- Mobile Controls Overlay unchanged -->
-<div class="mobile-controls" id="mobileControls" aria-hidden="true">...</div>
+<div class="mobile-controls" id="mobileControls" aria-hidden="true">
+  <div style="flex:1;">
+    <div class="dpad">
+      <div></div>
+      <button class="mobile-btn" data-key="ArrowUp" aria-label="Up">&#8593;</button>
+      <div></div>
+      <button class="mobile-btn" data-key="ArrowLeft" aria-label="Left">&#8592;</button>
+      <div></div>
+      <button class="mobile-btn" data-key="ArrowRight" aria-label="Right">&#8594;</button>
+      <div></div>
+      <button class="mobile-btn" data-key="ArrowDown" aria-label="Down">&#8595;</button>
+      <div></div>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;align-items:flex-end;justify-content:flex-end;gap:8px;">
+    <div class="abpad">
+      <button class="mobile-btn" data-key="KeyZ" aria-label="A">A</button>
+      <button class="mobile-btn" data-key="KeyX" aria-label="B">B</button>
+      <button class="mobile-btn" data-key="Enter" aria-label="Start">Start</button>
+      <button class="mobile-btn" data-key="ShiftRight" aria-label="Select">Sel</button>
+    </div>
+  </div>
+</div>
 <script>
 (() => {
   const BUILD = new Date().toISOString().replace('T',' ').slice(0,19);
