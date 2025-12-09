@@ -496,7 +496,7 @@
   // MMC1 (1)
   class Mapper1 extends Mapper {
    constructor(cart,ppu){
-    super(cart);
+    this.cart = cart;   
     this.ppu = ppu;
     this.shift=0x10;
     this.ctrl=0x0C;
@@ -560,7 +560,7 @@
   // UxROM (2)
   class Mapper2 extends Mapper {
     constructor(cart,ppu){
-    super(cart);
+    this.cart = cart; 
     this.ppu = ppu;
     this.bank=0;
   }
@@ -576,8 +576,8 @@
 
   // CNROM (3)
   class Mapper3 extends Mapper {
-    constructor(cart,ppu){
-    super(cart);
+    constructor(cart,ppu){;
+    this.cart = cart;  
     this.ppu = ppu;
     this.chrBank=0;
   }
@@ -591,8 +591,8 @@
   // MMC3 (4)
   class Mapper4 extends Mapper {
     constructor(cart,ppu){
-      super(cart);
-      this.ppu=ppu; this.reg=new Uint8Array(8);
+     this.cart = cart;
+     this.ppu=ppu; this.reg=new Uint8Array(8);
       this.bankSel=0; this.prgMode=0; this.chrMode=0;
       this.irqLatch=0; this.irqCounter=0; this.irqEnable=false; this.prevA12=0; this.triggeredIRQ=false;
       this.lastBank=(this.cart.prg.length/0x2000)-1;
