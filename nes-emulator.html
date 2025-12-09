@@ -467,7 +467,15 @@
   // ===== DEDUPLICATED/VALID MAPPER IMPLEMENTATIONS =====
   // Mapper base class
   class Mapper {
-    constructor(cart){ this.cart=cart; }
+    connectCart(cart) {
+  this.cart = cart;
+  if      (cart.mapper === 4) this.mapper = new Mapper4(cart, this);
+  else if (cart.mapper === 1) this.mapper = new Mapper1(cart, this);
+  else if (cart.mapper === 2) this.mapper = new Mapper2(cart, this);
+  else if (cart.mapper === 3) this.mapper = new Mapper3(cart, this);
+  else                        this.mapper = new Mapper0(cart);
+  this.mirror = this.mapper.mirroring;
+}
     prgRead(addr){ return this.cart.prg[addr-0x8000]; }
     prgWrite(addr,val){}
     chrRead(addr){ return this.cart.chr[addr]; }
@@ -487,7 +495,15 @@
 
   // MMC1 (1)
   class Mapper1 extends Mapper {
-    constructor(cart){ super(cart); this.shift=0x10; this.ctrl=0x0C; this.prgBank=0; this.chrBank0=0; this.chrBank1=0; }
+   constructor(cart,ppu){
+    super(cart);
+    this.ppu = ppu;
+    this.shift=0x10;
+    this.ctrl=0x0C;
+    this.prgBank=0;
+    this.chrBank0=0;
+    this.chrBank1=0;
+  } 
     writeReg(addr,val){
       if(val&0x80){ this.shift=0x10; this.ctrl|=0x0C; return; }
       const complete = (this.shift & 1);
@@ -543,7 +559,11 @@
 
   // UxROM (2)
   class Mapper2 extends Mapper {
-    constructor(cart){ super(cart); this.bank=0; }
+    constructor(cart,ppu){
+    super(cart);
+    this.ppu = ppu;
+    this.bank=0;
+  }
     prgRead(addr){
       if(addr<0xC000) return this.cart.prg[this.bank*0x4000 + (addr-0x8000)];
       return this.cart.prg[this.cart.prg.length-0x4000+(addr-0xC000)];
@@ -556,7 +576,11 @@
 
   // CNROM (3)
   class Mapper3 extends Mapper {
-    constructor(cart){ super(cart); this.chrBank=0; }
+    constructor(cart,ppu){
+    super(cart);
+    this.ppu = ppu;
+    this.chrBank=0;
+  }
     prgRead(addr){ return this.cart.prg[addr-0x8000]; }
     prgWrite(addr,val){ this.chrBank=val&0x03; }
     chrRead(addr){ return this.cart.chr[this.chrBank*0x2000 + addr]; }
@@ -1010,7 +1034,15 @@ incCoarseX() {
     this.v++;
   }
 }
-  
+  connectCart(cart) {
+  this.cart = cart;
+  if      (cart.mapper === 4) this.mapper = new Mapper4(cart, this);
+  else if (cart.mapper === 1) this.mapper = new Mapper1(cart, this);
+  else if (cart.mapper === 2) this.mapper = new Mapper2(cart, this);
+  else if (cart.mapper === 3) this.mapper = new Mapper3(cart, this);
+  else                        this.mapper = new Mapper0(cart);
+  this.mirror = this.mapper.mirroring;
+}
 evalSprites() {
   // Evaluate which sprites are visible on the current scanline
   const y = this.scanline;
