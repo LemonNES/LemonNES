@@ -467,7 +467,7 @@
   // ===== DEDUPLICATED/VALID MAPPER IMPLEMENTATIONS =====
   // Mapper base class
   class Mapper {
-    constructor(cart){ this.cart=cart; }
+    constructor(cart){ this.cart=cart; this.ppu = ppu; }
     prgRead(addr){ return this.cart.prg[addr-0x8000]; }
     prgWrite(addr,val){}
     chrRead(addr){ return this.cart.chr[addr]; }
