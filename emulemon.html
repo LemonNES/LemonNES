@@ -935,8 +935,10 @@
 
   const cindex = spriteOpaque && (!spritePriority||bgPx===0) ? 0x10+spritePalette+spPx : bgPx ? colorIndex : this.palette[0];
   const rgb=NTSC_PALETTE[cindex&0x3f];
-  img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255;
+  // --- FIX APPLIED HERE ---
+  this.img[idx]=rgb[0]; this.img[idx+1]=rgb[1]; this.img[idx+2]=rgb[2]; this.img[idx+3]=255;
 }
+    
  step() {  
     // Odd-frame cycle skip  
     if (  
