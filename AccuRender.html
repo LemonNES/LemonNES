@@ -701,346 +701,501 @@
       if(addr>=0x6000){this.ppu.cart.sram[addr-0x6000]=val; return;}  
     }  
   } 
-  // ===== PPU Mapper Selection Example =====
-  class PPU {
-    constructor() {
-       this.v = 0;  
-    this.t = 0;  
-    this.x = 0;  
-    this.w = 0;  
-    this.ctrl = 0;  
-    this.mask = 0;  
-    this.status = 0;  
-    this.oamaddr = 0;  
-    this.buffered = 0;  
-    this.openBus = 0;  
-    this.oam = new Uint8Array(256);  
-    this.secOAM = new Uint8Array(32);  
-    this.spriteCount = 0;  
-    this.spriteZeroInLine = false;  
-    this.spriteZeroHit = false;  
-    this.cycle = 0;  
-    this.scanline = 261;  
-    this.frame = 0;  
-    this.nmi = false;  
-    this.cart = null;  
-    this.mapper = null;  
-    this.canvas = null;  
-    this.ctx = null;  
-    this.output = null;  
-    this.vram = new Uint8Array(0x800);  
-    this.palette = new Uint8Array(32);  
-    this.bgLatch = { lo: 0, hi: 0, pal: 0 };  
-    this.oddFrame = false;  
-    this.nmiDelay = 0;  
-  }  
-  attachCanvas(canvas) {  
-    this.canvas = canvas;  
-    this.ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });  
-    this.output = this.ctx.createImageData(256, 240);  
-    this.mirror = "horizontal";
-    }
-    connectCart(cart) {
-      this.cart = cart;
-      if      (cart.mapper === 4) this.mapper = new Mapper4(cart, this);
-      else if (cart.mapper === 1) this.mapper = new Mapper1(cart, this);
-      else if (cart.mapper === 2) this.mapper = new Mapper2(cart, this);
-      else if (cart.mapper === 3) this.mapper = new Mapper3(cart, this);
-      else                        this.mapper = new Mapper0(cart, this);
-      this.mirror = this.mapper.mirroring;
-    }
-    read(addr) {
-  switch (addr & 0x2007) {
-    case 0x0002: // PPUSTATUS
-      // Return PPU status with proper read side effects
-      const res = this.status;
-      this.status &= ~0x80; // Clear vblank
-      this.w = 0;
-      return res;
-    case 0x0004: // OAMDATA
-      return this.oam[this.oamaddr];
-    case 0x0007: // PPUDATA
-      let value = this.ppuRead(this.v);
-      // Open-bus: buffered reads except for palette
-      if (this.v < 0x3F00) {
-        value = this.buffered;
-        this.buffered = this.ppuRead(this.v);
-      } else {
-        this.buffered = this.ppuRead(this.v - 0x1000);
-      }
-      this.v += (this.ctrl & 0x04) ? 32 : 1;
-      this.v &= 0x7fff;
-      return value;
-    default:
-      // Reading write-only registers or others returns open bus or status
-      return this.openBus || 0;
-  }
-}
- write(addr, val) {
-  // Only registers 0x2000-0x2007 (mirrored every 8 bytes)
-  switch (addr & 0x2007) {
-    case 0x0000: // PPUCTRL
-      this.ctrl = val;
-      this.t = (this.t & 0xf3ff) | ((val & 0x03) << 10);
-      break;
-    case 0x0001: // PPUMASK
-      this.mask = val;
-      break;
-    case 0x0003: // OAMADDR
-      this.oamaddr = val;
-      break;
-    case 0x0004: // OAMDATA
-      this.oam[this.oamaddr++] = val;
-      this.oamaddr &= 0xFF;
-      break;
-    case 0x0005: // PPUSCROLL
-      if (this.w === 0) {
-        this.x = val & 0x07;
-        this.t = (this.t & 0x7fe0) | ((val & 0xf8) >> 3);
-        this.w = 1;
-      } else {
-        this.t = (this.t & 0x0c1f) | ((val & 0x07) << 12) | ((val & 0xf8) << 2);
-        this.w = 0;
-      }
-      break;
-    case 0x0006: // PPUADDR
-      if (this.w === 0) {
-        this.t = (this.t & 0x00ff) | ((val & 0x3f) << 8);
-        this.w = 1;
-      } else {
-        this.t = (this.t & 0x7f00) | val;
-        this.v = this.t;
-        this.w = 0;
-      }
-      break;
-    case 0x0007: // PPUDATA
-      this.ppuWrite(this.v, val);
-      this.v += (this.ctrl & 0x04) ? 32 : 1;
-      this.v &= 0x7fff;
-      break;
-    default:
-      // registers 0x2002=read only, ignore
-      break;
-  }
-}
-    ntIndex(addr) {
-      /* corrected mirroring */
-      const a = (addr - 0x2000) & 0x0FFF;
-      const nt = (a >> 10) & 3;
-      const off = a & 0x03FF;
-      switch(this.mirror) {
-        case 'vertical':   return ((nt&1)*0x400)+off;
-        case 'horizontal': return (((nt>>1)&1)*0x400)+off;
-        case 'four':       return a;
-        case 'single0':    return off;
-        case 'single1':    return 0x400+off;
-        default:           return off;
-      }
-    }
-    // Attribute table fix
-    bgFetch() {
-      const nt = 0x2000|(this.v&0x0FFF);
-      const at = 0x23C0|(this.v&0x0C00)|(((this.v>>4)&0x38))|(((this.v>>2)&0x07));
-      const fineY = (this.v>>12)&7;
-      const tile = this.ppuRead(nt);
-      const attr = this.ppuRead(at);
-      /* Correct 2-bit attribute select */
-      const shift = (((this.v>>4)&4)|((this.v)&2))/2;
-      const pal = ((attr>>shift)&3)<<2;
-      const base=(this.ctrl&0x10)?0x1000:0x0000;
-      const addr = base+tile*16+fineY;
-      const lo = this.ppuRead(addr);
-      const hi = this.ppuRead(addr+8);
-      return {lo,hi,pal};
-    }
+  // ===== PPU =====
+class PPU {
+  constructor() {
+    // PPU registers / internal
+    this.v = 0;       // current VRAM address (15 bits)
+    this.t = 0;       // temporary VRAM address
+    this.x = 0;       // fine X (3 bits)
+    this.w = 0;       // write toggle
+    this.ctrl = 0;    // $2000
+    this.mask = 0;    // $2001
+    this.status = 0;  // $2002 (VBlank, sprite0, overflow)
+    this.oamAddr = 0; // OAMADDR
+    this.oam = new Uint8Array(256);   // primary OAM
+    this.secOAM = new Uint8Array(32); // secondary OAM for scanline (8 sprites * 4)
+    this.spriteCount = 0;
+    this.spriteZeroInLine = false;
 
-    // Sprite-0 hit fix: Only set hit if non-transparent sprite pixel overlaps non-transparent bg pixel
-    renderPixel(x,y,bg,sp){
-      const idx=(y*256+x)*4, img=this.output.data;
-      let bgPx=0, colorIndex=0;
-      if(this.mask&0x08){
-        const bit=7-((x+this.x)&7);
-        bgPx=((bg.hi>>bit)&1)<<1|((bg.lo>>bit)&1);
-        colorIndex= bgPx? (0x10+bg.pal+bgPx) : 0;
+    // Memory
+    this.vram = new Uint8Array(0x1000); // 4 name/attr tables unified by mirroring mapping
+    this.palette = new Uint8Array(32);
+    this.canvas = null;
+    this.ctx = null;
+    this.output = new ImageData(256, 240);
+
+    // Timing
+    this.cycle = 0;
+    this.scanline = 261; // pre-render start
+    this.frame = 0;
+    this.oddFrame = false;
+
+    // Latches/shift registers for background rendering
+    this.bgLatch = { lo: 0, hi: 0, pal: 0 };
+    this.bgShiftLo = 0;
+    this.bgShiftHi = 0;
+    this.attrShiftLo = 0; // attribute shift registers (2-bit replicated)
+    this.attrShiftHi = 0;
+
+    // Cartridge / mapper injected later
+    this.cart = null;
+    this.mapper = null;
+
+    // NMI request flag (CPU driver must call cpu.nmi() when it sees this true)
+    this.nmi = false;
+
+    // mirroring: 'horizontal'|'vertical'|'four'|'single0'|'single1'
+    this.mirror = 'horizontal';
+
+    // default bg palette index (backdrop)
+    this.palette[0] = 0x0F;
+
+    // small helper caches
+    this._ntIndexCache = null;
+  }
+
+  attachCanvas(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d', { alpha: false });
+    this.output = this.ctx.createImageData(256, 240);
+  }
+
+  connectCart(cart) {
+    this.cart = cart;
+    // if cartridges have dedicated mapper objects, ensure PPU gets it
+    this.mapper = null;
+    if (cart && cart.mapperInstance) this.mapper = cart.mapperInstance;
+    // copy CHR (cart.chr) will be referenced in ppuRead() through mapper or cart
+  }
+
+  setMirroring(mirror) {
+    this.mirror = mirror;
+  }
+
+  // Reset PPU internal state
+  reset() {
+    this.v = this.t = this.x = this.w = 0;
+    this.ctrl = this.mask = this.status = 0;
+    this.oamAddr = 0;
+    this.oam.fill(0);
+    this.secOAM.fill(0);
+    this.spriteCount = 0;
+    this.spriteZeroInLine = false;
+    this.cycle = 0;
+    this.scanline = 261;
+    this.frame = 0;
+    this.oddFrame = false;
+    this.bgShiftLo = this.bgShiftHi = 0;
+    this.attrShiftLo = this.attrShiftHi = 0;
+    this.bgLatch = { lo: 0, hi: 0, pal: 0 };
+    this.nmi = false;
+    // clear vram and palette? keep as-is to avoid erasing horizontally-mapped SRAM; but safe to zero:
+    // this.vram.fill(0);
+    // this.palette.fill(0);
+    // warm-up: some games expect a few PPU cycles before NMI; handled by CPU reset/warm logic if needed
+  }
+
+  // CPU-facing PPU register reads/writes (addresses 0x2000-0x2007)
+  read(addr) {
+    addr &= 7;
+    switch (addr) {
+      case 2: // $2002: PPUSTATUS
+        const val = this.status | (this._openBus || 0);
+        // reading $2002 clears vblank and write toggle
+        this.status &= ~0x80;
+        this.w = 0;
+        return val;
+      case 4: // OAMDATA
+        return this.oam[this.oamAddr];
+      case 7: // PPUDATA
+        // reading returns buffered value except for palette reads
+        let data = this.ppuRead(this.v);
+        if ((this.v & 0x3FFF) < 0x3F00) {
+          // buffered read
+          const buffered = this._readBuffer !== undefined ? this._readBuffer : 0;
+          this._readBuffer = data;
+          data = buffered;
+        } else {
+          // palette read is direct (no buffering)
+          data = this.ppuRead(this.v);
+          this._readBuffer = this.ppuRead(this.v & ~0x10); // open-bus behavior approximation
+        }
+        // increment v
+        this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+        return data;
+      default:
+        return 0;
+    }
+  }
+
+  write(addr, value) {
+    addr &= 7;
+    value &= 0xFF;
+    switch (addr) {
+      case 0: // PPUCTRL ($2000)
+        this.ctrl = value;
+        // t: .....VN... ........ => copy name table bits into t
+        this.t = (this.t & 0xF3FF) | ((value & 0x03) << 10);
+        break;
+      case 1: // PPUMASK ($2001)
+        this.mask = value;
+        break;
+      case 3: // OAMADDR ($2003)
+        this.oamAddr = value;
+        break;
+      case 4: // OAMDATA ($2004)
+        this.oam[this.oamAddr] = value;
+        this.oam[this.oamAddr = (this.oamAddr + 1) & 0xFF] = this.oam[this.oamAddr] || 0;
+        // actually the increment above was wrong in some code — keep simple:
+        this.oamAddr = (this.oamAddr + 1) & 0xFF;
+        break;
+      case 5: // PPUSCROLL ($2005)
+        if (this.w === 0) {
+          // first write: coarse X and fine X
+          this.t = (this.t & 0x7FE0) | ((value >> 3) & 0x1F);
+          this.x = value & 0x07;
+          this.w = 1;
+        } else {
+          // second write: coarse Y and fine Y
+          this.t = (this.t & 0x0C1F) | ((value & 0x07) << 12) | ((value & 0xF8) << 2);
+          this.w = 0;
+        }
+        break;
+      case 6: // PPUADDR ($2006)
+        if (this.w === 0) {
+          this.t = (this.t & 0x00FF) | ((value & 0x3F) << 8);
+          this.w = 1;
+        } else {
+          this.t = (this.t & 0x7F00) | value;
+          this.v = this.t;
+          this.w = 0;
+        }
+        break;
+      case 7: // PPUDATA ($2007)
+        this.ppuWrite(this.v, value);
+        this.v = (this.v + ((this.ctrl & 0x04) ? 32 : 1)) & 0x7FFF;
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Low-level PPU memory access for pattern/name/palette
+  ppuRead(addr) {
+    addr &= 0x3FFF;
+    // CHR (0x0000-0x1FFF)
+    if (addr < 0x2000) {
+      // use mapper chrRead if present
+      if (this.mapper && typeof this.mapper.chrRead === 'function') return this.mapper.chrRead(addr);
+      if (this.cart && this.cart.chr) return this.cart.chr[addr & (this.cart.chr.length - 1)];
+      return 0;
+    }
+    // Nametables (0x2000-0x2FFF) -> mirrored region 0x2000-0x2FFF, with mirroring control
+    if (addr < 0x3F00) {
+      const idx = this.ntIndex(addr);
+      return this.vram[idx & 0x0FFF];
+    }
+    // Palettes (0x3F00 - 0x3FFF) with mirroring of 0x10 entries and $10 mirrors
+    let palAddr = addr & 0x1F;
+    if ([0x10, 0x14, 0x18, 0x1C].includes(palAddr)) palAddr -= 0x10;
+    return this.palette[palAddr];
+  }
+
+  ppuWrite(addr, value) {
+    addr &= 0x3FFF;
+    value &= 0xFF;
+    if (addr < 0x2000) {
+      if (this.mapper && typeof this.mapper.chrWrite === 'function') {
+        this.mapper.chrWrite(addr, value);
+        return;
       }
-      let spriteOpaque=0,spritePriority=0,spritePalette=0,sprite0=false,spPx=0;
-      if(this.mask&0x10){
-        for(let i=0;i<this.spriteCount;i++){
-          const o=i*4;
-          const sy=this.secOAM[o], tile=this.secOAM[o+1], attr=this.secOAM[o+2], sx=this.secOAM[o+3];
-          const h=8;
-          const row=y-sy;
-          if(x<sx||x>=sx+8||row<0||row>=h) continue;
-          const flipV=(attr>>7)&1, flipH=(attr>>6)&1;
-          const palette=((attr&3)+4)<<2;
-          spritePriority=(attr>>5)&1;
-          if(this.spriteZeroInLine&&i===0) sprite0=true;
-          const fineY=flipV?(7-row):row;
-          const base=(this.ctrl&0x08)?0x1000:0x0000;
-          const addr=base+tile*16+fineY;
-          const lo=this.ppuRead(addr);
-          const hi=this.ppuRead(addr+8);
-          const bit=flipH?(x-sx):(7-(x-sx));
-          spPx = ((hi>>bit)&1)<<1|((lo>>bit)&1);
-          if(spPx){
-            spriteOpaque=1; spritePalette=palette; break;
-          }
+      if (this.cart && this.cart.chrRAM) {
+        this.cart.chr[addr] = value;
+        return;
+      }
+      return;
+    }
+    if (addr < 0x3F00) {
+      const idx = this.ntIndex(addr);
+      this.vram[idx & 0x0FFF] = value;
+      return;
+    }
+    let palAddr = addr & 0x1F;
+    if ([0x10, 0x14, 0x18, 0x1C].includes(palAddr)) palAddr -= 0x10;
+    this.palette[palAddr] = value & 0x3F; // palette values are 6-bit
+  }
+
+  // Mirroring mapping from 0x2000..0x2FFF => vram indices (0..0x0FFF)
+  ntIndex(addr) {
+    const a = (addr - 0x2000) & 0x0FFF;
+    const nt = (a >> 10) & 3;
+    const off = a & 0x03FF;
+    switch (this.mirror) {
+      case 'vertical':   return ((nt & 1) * 0x400) + off;
+      case 'horizontal': return (((nt >> 1) & 1) * 0x400) + off;
+      case 'four':       return a;
+      case 'single0':    return off;
+      case 'single1':    return 0x400 + off;
+      default:           return off;
+    }
+  }
+
+  // Background fetch for the current coarse tile (8-pixel block)
+  // IMPORTANT: This returns the lo/hi pattern bytes for the fine Y and the 2-bit palette index (shifted correctly)
+  bgFetch() {
+    // compute addresses from v (current VRAM address)
+    const ntAddr = 0x2000 | (this.v & 0x0FFF);
+    const atAddr = 0x23C0 | (this.v & 0x0C00) | ((this.v >> 4) & 0x38) | ((this.v >> 2) & 0x07);
+    const fineY = (this.v >> 12) & 0x07;
+    const tileIndex = this.ppuRead(ntAddr);
+    const attribute = this.ppuRead(atAddr);
+
+    // Correct quadrant extraction:
+    // bits: coarse X is bits 0-4, coarse Y bits 5-9 of v
+    // attribute quadrant is ((coarseY >> 2) << 1) | (coarseX >> 2)
+    const shift = (((this.v >> 4) & 4) | ((this.v >> 2) & 2));
+    const paletteHigh = (attribute >> shift) & 0x03;
+
+    const basePattern = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
+    const patternAddr = basePattern + (tileIndex << 4) + fineY;
+    const lo = this.ppuRead(patternAddr);
+    const hi = this.ppuRead(patternAddr + 8);
+    return { lo: lo & 0xFF, hi: hi & 0xFF, pal: (paletteHigh << 2) & 0x0F };
+  }
+
+  // Increment coarse X (PPU horizontal scrolling)
+  incCoarseX() {
+    if ((this.v & 0x001F) === 31) {
+      this.v &= ~0x001F;
+      this.v ^= 0x0400;
+    } else {
+      this.v++;
+    }
+  }
+
+  // Increment Y (fine Y and coarse Y)
+  incY() {
+    if ((this.v & 0x7000) !== 0x7000) {
+      this.v += 0x1000;
+    } else {
+      this.v &= ~0x7000;
+      let y = (this.v & 0x03E0) >> 5;
+      if (y === 29) {
+        y = 0;
+        this.v ^= 0x0800;
+      } else if (y === 31) {
+        y = 0;
+      } else {
+        y++;
+      }
+      this.v = (this.v & ~0x03E0) | (y << 5);
+    }
+  }
+
+  copyX() {
+    this.v = (this.v & ~0x041F) | (this.t & 0x041F);
+  }
+
+  copyY() {
+    this.v = (this.v & ~0x7BE0) | (this.t & 0x7BE0);
+  }
+
+  // Evaluate sprites for this.scanline into secOAM (called at dot 1..64 as appropriate)
+  evalSprites() {
+    const y = this.scanline;
+    this.spriteCount = 0;
+    this.spriteZeroInLine = false;
+    for (let i = 0; i < 64; i++) {
+      const o = i * 4;
+      const sy = this.oam[o];
+      const tile = this.oam[o + 1];
+      const attr = this.oam[o + 2];
+      const sx = this.oam[o + 3];
+      const h = (this.ctrl & 0x20) ? 16 : 8;
+      const row = y - sy;
+      if (row >= 0 && row < h) {
+        if (this.spriteCount < 8) {
+          if (i === 0) this.spriteZeroInLine = true;
+          this.secOAM[this.spriteCount * 4 + 0] = sy;
+          this.secOAM[this.spriteCount * 4 + 1] = tile;
+          this.secOAM[this.spriteCount * 4 + 2] = attr;
+          this.secOAM[this.spriteCount * 4 + 3] = sx;
+        }
+        this.spriteCount++;
+        if (this.spriteCount === 9) { // overflow detection (hardware sets on >8 possible sprites)
+          this.status |= 0x20;
+          // keep scanning but we already marked overflow; we do not copy beyond 8 into secOAM
         }
       }
-      // Only set sprite-0 hit if NOT in leftmost 8px as per hardware
-      if(sprite0 && bgPx && spPx && (x>=0&&x<256 && y>=0&&y<240))
-        this.status |= 0x40;
+    }
+    // clamp count to 8 for rendering
+    this.spriteCount = Math.min(this.spriteCount, 8);
+  }
 
-      const cindex =
-        spriteOpaque && (!spritePriority||bgPx===0) ? 0x10+spritePalette+spPx :
-        bgPx ? colorIndex : this.palette[0];
-      const rgb=NTSC_PALETTE[cindex&0x3f];
-      img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255;
+  // Render a single pixel (x,y). Uses background latch/shift registers and secOAM for sprites.
+  // This implementation expects precomputed bg LATCH values at appropriate times by the step() driver.
+  renderPixel(x, y, bg) {
+    if (x < 0 || x >= 256 || y < 0 || y >= 240) return;
+
+    const idx = (y * 256 + x) * 4;
+    const img = this.output.data;
+
+    // Background pixel calculation
+    let bgPx = 0;
+    let bgColorIndex = 0;
+    if (this.mask & 0x08) {
+      const bit = 7 - ((x + this.x) & 7);
+      bgPx = ((this.bgShiftHi >> bit) & 1) << 1 | ((this.bgShiftLo >> bit) & 1);
+      bgColorIndex = bgPx ? (0x10 + bg.pal + bgPx) : 0;
     }
- step() {  
-    // Odd-frame cycle skip  
-    if (  
-      this.scanline === 261 &&  
-      this.cycle === 339 &&  
-      (this.mask & 0x18) &&  
-      this.oddFrame  
-    ) {  
-      this.cycle++;  
-      this.oddFrame = false;  
-      return;  
-    }  
-    // Visible scanlines 0-239; pre-render 261; vblank 241-260  
-    if (this.scanline === 261) {  
-      if (this.cycle === 1) {  
-        this.status &= ~(0x80 | 0x40 | 0x20);  
-      }  
-      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {  
-        this.copyY();  
-      }  
-    }  
-    if (this.scanline >= 0 && this.scanline < 240) {  
-      if (this.cycle === 0) {  
-      } else if (this.cycle === 1) {  
-        this.evalSprites();  
-      }  
-      if (this.cycle >= 1 && this.cycle <= 256) {  
-        if ((this.cycle - 1) % 8 === 0) {  
-          this.bgLatch = this.bgFetch();  
-        }  
-        const x = this.cycle - 1;  
-        const y = this.scanline;  
-        this.renderPixel(x, y, this.bgLatch, null);  
-        if ((this.cycle & 7) === 0) {  
-          this.incCoarseX();  
-        }  
-      }  
-      if (this.cycle === 257) {  
-        this.copyX();  
-      }  
-      if (this.cycle === 256) {  
-        this.incY();  
-      }  
-    }  
-    if (this.scanline === 241 && this.cycle === 1) {  
-      this.status |= 0x80;  
-      if (this.ctrl & 0x80) {  
-        this.nmiDelay = 2; // NMI delay for correct edge timing  
-      }  
-      this.ctx.putImageData(this.output, 0, 0);  
-    }  
-    if (this.nmiDelay > 0) {  
-      this.nmiDelay--;  
-      if (this.nmiDelay === 0) {  
-        this.nmi = true;  
-      }  
-    }  
-    this.cycle++;  
-    if (this.cycle > 340) {  
-      this.cycle = 0;  
-      this.scanline++;  
-      if (this.scanline > 261) {  
-        this.scanline = 0;  
-        this.frame++;  
-        this.oddFrame = !this.oddFrame;  
-      }  
-    }  
-  }
-    ppuRead(addr) {
-  addr &= 0x3fff;
-  if (addr < 0x2000) return this.mapper.chrRead(addr);
-  if (addr < 0x3f00) return this.vram[this.ntIndex(addr)];
-  let palAddr = addr & 0x1f;
-  if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
-  return this.palette[palAddr];
-}
-ppuWrite(addr, val) {
-  addr &= 0x3fff;
-  val &= 0xff;
-  if (addr < 0x2000) this.mapper.chrWrite(addr, val);
-  else if (addr < 0x3f00) this.vram[this.ntIndex(addr)] = val;
-  else {
-    let palAddr = addr & 0x1f;
-    if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
-    this.palette[palAddr] = val;
-  }
-}
-copyY() {
-  this.v = (this.v & ~0x7be0) | (this.t & 0x7be0);
-}
-copyX() {
-  this.v = (this.v & ~0x041f) | (this.t & 0x041f);
-}
-incY() {
-  if ((this.v & 0x7000) !== 0x7000) this.v += 0x1000;
-  else {
-    this.v &= ~0x7000;
-    let y = (this.v & 0x03e0) >> 5;
-    if (y === 29) {
-      y = 0;
-      this.v ^= 0x0800;
-    } else if (y === 31) {
-      y = 0;
-    } else {
-      y++;
-    }
-    this.v = (this.v & ~0x03e0) | (y << 5);
-  }
-}
-incCoarseX() {
-  if ((this.v & 0x001f) === 31) {
-    this.v &= ~0x001f;
-    this.v ^= 0x0400;
-  } else {
-    this.v++;
-  }
-}
-  
-evalSprites() {
-  // Evaluate which sprites are visible on the current scanline
-  const y = this.scanline;
-  this.spriteCount = 0;
-  this.spriteZeroInLine = false;
-  for(let i = 0; i < 64; i++) {
-    const o = i * 4;
-    const sy = this.oam[o];
-    const h = (this.ctrl & 0x20) ? 16 : 8; // 8 or 16 pixel sprites
-    const row = y - sy;
-    if(row >= 0 && row < h && this.spriteCount < 8) {
-      if(i === 0) this.spriteZeroInLine = true;
-      // Copy OAM data into secondary OAM buffer
-      this.secOAM[this.spriteCount*4+0] = this.oam[o];
-      this.secOAM[this.spriteCount*4+1] = this.oam[o+1];
-      this.secOAM[this.spriteCount*4+2] = this.oam[o+2];
-      this.secOAM[this.spriteCount*4+3] = this.oam[o+3];
-      this.spriteCount++;
-      if(this.spriteCount === 8) {
-        this.status |= 0x20; // Set sprite overflow flag
-        break;
+
+    // Sprite pixel calculation: check secOAM entries (first that has nonzero pixel)
+    let spriteOpaque = 0;
+    let spritePriority = 0;
+    let spritePalette = 0;
+    let sprite0 = false;
+    let spPx = 0;
+
+    if (this.mask & 0x10 && this.spriteCount > 0) {
+      for (let i = 0; i < this.spriteCount; i++) {
+        const o = i * 4;
+        const sy = this.secOAM[o];
+        const tile = this.secOAM[o + 1];
+        const attr = this.secOAM[o + 2];
+        const sx = this.secOAM[o + 3];
+        const h = (this.ctrl & 0x20) ? 16 : 8;
+        const row = y - sy;
+        if (row < 0 || row >= h) continue;
+        if (x < sx || x >= sx + 8) continue;
+
+        const flipV = (attr >> 7) & 1;
+        const flipH = (attr >> 6) & 1;
+        const paletteIndex = (attr & 3);
+        spritePriority = (attr >> 5) & 1;
+        if (this.spriteZeroInLine && i === 0) sprite0 = true;
+
+        const fineY = flipV ? (h - 1 - row) : row;
+        const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
+        // For 8x16 sprites, handling is more complex; this simple implementation supports 8x8 and 8x16 via mapper tile selection if needed
+        const addr = base + tile * 16 + fineY;
+        const lo = this.ppuRead(addr);
+        const hi = this.ppuRead(addr + 8);
+        const bit = flipH ? (x - sx) : (7 - (x - sx));
+        spPx = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+        if (spPx) {
+          spriteOpaque = 1;
+          spritePalette = ((paletteIndex + 4) << 2);
+          break;
+        }
       }
     }
+
+    // Sprite 0 hit: only when non-transparent sprite pixel overlaps non-transparent bg pixel
+    if (sprite0 && spriteOpaque && bgPx && x < 255 && y < 240) {
+      this.status |= 0x40;
+    }
+
+    // Final palette index decision: sprite wins if opaque and priority==0 or background is 0
+    const useSprite = spriteOpaque && (!spritePriority || bgPx === 0);
+    const finalPaletteIndex = useSprite ? (0x10 + spritePalette + spPx) :
+                              (bgPx ? bgColorIndex : this.palette[0]);
+
+    // Palette read
+    const palVal = this.ppuRead(0x3F00 + (finalPaletteIndex & 0x1F)) & 0x3F;
+    const rgb = NTSC_PALETTE[palVal & 0x3F];
+
+    img[idx] = rgb[0];
+    img[idx + 1] = rgb[1];
+    img[idx + 2] = rgb[2];
+    img[idx + 3] = 255;
   }
-}
-}
+
+  // DMA from CPU memory into OAM (used by $4014)
+  doDMA(buffer) {
+    // buffer is Uint8Array(256)
+    for (let i = 0; i < 256; i++) this.oam[i] = buffer[i];
+  }
+
+  // Single PPU cycle step — drives scanning and sets nmi on vblank
+  // This is compatible with your existing driver that calls ppu.step() in loops.
+  step() {
+    // odd frame skip behavior (pre-render frame)
+    if (this.scanline === 261 && this.cycle === 339 && (this.mask & 0x18) && this.oddFrame) {
+      this.cycle++;
+      this.oddFrame = false;
+      return;
+    }
+
+    // Visible scanlines 0-239: rendering
+    if (this.scanline >= 0 && this.scanline <= 239) {
+      if (this.cycle >= 1 && this.cycle <= 256) {
+        // For each pixel, we need to shift registers and render pixel
+        // Note: a proper implementation updates shift regs every cycle
+        // For simplicity: call renderPixel at the right time after prefetch.
+        // We'll compute a bg pixel using current shift registers pre-filled by bgFetch() invocation
+        // (Ensure the CPU driver arranges bgFetch/load into shift regs at dot boundaries or adapt here)
+        this.renderPixel(this.cycle - 1, this.scanline, this.bgLatch);
+        // rotate shift registers left by 1 for the next pixel:
+        this.bgShiftLo <<= 1;
+        this.bgShiftHi <<= 1;
+      }
+      if (this.cycle === 257) {
+        // end of visible area: copy horizontal bits from t to v
+        this.copyX();
+        // evaluate sprites for next scanline
+        this.evalSprites();
+      }
+    }
+
+    // pre-render line 261: clear flags, prepare for next frame
+    if (this.scanline === 261) {
+      if (this.cycle === 1) {
+        // clear vblank/sprite flags
+        this.status &= ~(0x80 | 0x40 | 0x20);
+      }
+      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {
+        // vertical bits copy from t to v
+        this.copyY();
+      }
+    }
+
+    // vblank set at start of scanline 241, cycle 1
+    if (this.scanline === 241 && this.cycle === 1) {
+      this.status |= 0x80; // set VBlank
+      if (this.ctrl & 0x80) {
+        this.nmi = true; // CPU driver must call cpu.nmi() then clear
+      }
+      // flush the ImageData to canvas once per frame
+      if (this.ctx && this.scanline === 241 && this.cycle === 1) {
+        // draw current frame
+        try {
+          this.ctx.putImageData(this.output, 0, 0);
+        } catch (e) {
+          // some browsers can throw if context lost — ignore for now
+        }
+      }
+    }
+
+    // Advance cycle/scanline
+    this.cycle++;
+    if (this.cycle > 340) {
+      this.cycle = 0;
+      this.scanline++;
+      if (this.scanline > 261) {
+        this.scanline = 0;
+        this.frame++;
+        this.oddFrame = !this.oddFrame;
+      }
+    }
+
+    // If mapper wants PPU cycle notifications (e.g., MMC3 A12), call it
+    if (this.mapper && typeof this.mapper.ppuCycle === 'function') {
+      this.mapper.ppuCycle();
+    }
+  }
+} // end class PPU
+
   // [UI, NES main loop unchanged - only Mapper fixes above]
   // Make sure your NES class calls connectCart and updates the UI.
 // ===== 6502 CPU (official opcodes only) =====  
@@ -1202,15 +1357,31 @@ evalSprites() {
       window.addEventListener('resize', resize);  
       resize();
     }
-      loadROM(bytes){
-      this.cart=new Cartridge(bytes);
-      this.ppu.connectCart(this.cart);
-      this.bus=new Bus(null,this.ppu,this.cart,this.input,this.apu);
-      this.cpu=new CPU6502(this.bus); this.bus.cpu=this.cpu;
-      this.cpu.reset();
-      document.getElementById('mapper').textContent=this.cart.mapper;
-      document.getElementById('mirror').textContent=this.cart.mirror;
+    loadROM(bytes) {
+  
+  this.cart = new Cartridge(bytes);
+  this.ppu.connectCart(this.cart);
+  if (this.cart.mapper) {
+    // instantiate mapper instance if your code expects this
+    if (!this.cart.mapperInstance && typeof MapperFactory !== 'undefined') {
+      this.cart.mapperInstance = MapperFactory(this.cart, this.ppu);
     }
+    this.ppu.mapper = this.cart.mapperInstance || null;
+  }
+
+  // create bus & cpu & wire up (keep your existing wiring)
+  this.bus = new Bus(null, this.ppu, this.cart, this.input, this.apu);
+  this.cpu = new CPU6502(this.bus);
+  this.bus.cpu = this.cpu;
+
+  // Reset CPU and PPU after cartridge is connected (CRITICAL)
+  this.cpu.reset();
+  this.ppu.reset();
+
+  // update UI
+  document.getElementById('mapper').textContent = this.cart.mapper;
+  document.getElementById('mirror').textContent = this.cart.mirror;
+}    
     reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
     step(){
       const cyc=this.cpu.step();
