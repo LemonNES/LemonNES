@@ -1302,28 +1302,3 @@ evalSprites() {
 </script>
 </body>
 </html>
-
-// --- Added: Safer CPU/PPU stepping helper (minimal) ---
-function runFrameSafe(nes) {
-  // one NTSC frame ~= 89342 PPU cycles; 1 CPU cycle == 3 PPU cycles roughly
-  const PPU_PER_FRAME = 89342;
-  let ppuCycles = 0;
-  // run until a frame worth of ppu cycles is produced
-  while (ppuCycles < PPU_PER_FRAME) {
-    // run CPU for one opcode (returns cycles consumed)
-    const cpuCycles = nes.cpu.step();
-    if (!cpuCycles || cpuCycles <= 0) break;
-    // advance PPU by cpuCycles * 3
-    for (let i = 0; i < cpuCycles * 3; i++) {
-      nes.ppu.step();
-    }
-    // basic APU stepping
-    if (nes.apu && typeof nes.apu.step === 'function') nes.apu.step(cpuCycles);
-    ppuCycles += cpuCycles * 3;
-    // safety: prevent infinite loop in case of broken CPU step
-    if (ppuCycles > PPU_PER_FRAME * 4) break;
-  }
-  // at end of frame ensure the canvas is updated (ppu.step writes at vblank)
-}
-// Expose helper for debug UI
-window.runFrameSafe = runFrameSafe;
