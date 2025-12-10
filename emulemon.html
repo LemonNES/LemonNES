@@ -855,48 +855,88 @@
     }
 
     // Sprite-0 hit fix: Only set hit if non-transparent sprite pixel overlaps non-transparent bg pixel
-    renderPixel(x,y,bg,sp){
-      const idx=(y*256+x)*4, img=this.output.data;
-      let bgPx=0, colorIndex=0;
-      if(this.mask&0x08){
-        const bit=7-((x+this.x)&7);
-        bgPx=((bg.hi>>bit)&1)<<1|((bg.lo>>bit)&1);
-        colorIndex= bgPx? (0x10+bg.pal+bgPx) : 0;
-      }
-      let spriteOpaque=0,spritePriority=0,spritePalette=0,sprite0=false,spPx=0;
-      if(this.mask&0x10){
-        for(let i=0;i<this.spriteCount;i++){
-          const o=i*4;
-          const sy=this.secOAM[o], tile=this.secOAM[o+1], attr=this.secOAM[o+2], sx=this.secOAM[o+3];
-          const h=8;
-          const row=y-sy;
-          if(x<sx||x>=sx+8||row<0||row>=h) continue;
-          const flipV=(attr>>7)&1, flipH=(attr>>6)&1;
-          const palette=((attr&3)+4)<<2;
-          spritePriority=(attr>>5)&1;
-          if(this.spriteZeroInLine&&i===0) sprite0=true;
-          const fineY=flipV?(7-row):row;
-          const base=(this.ctrl&0x08)?0x1000:0x0000;
-          const addr=base+tile*16+fineY;
-          const lo=this.ppuRead(addr);
-          const hi=this.ppuRead(addr+8);
-          const bit=flipH?(x-sx):(7-(x-sx));
-          spPx = ((hi>>bit)&1)<<1|((lo>>bit)&1);
-          if(spPx){
-            spriteOpaque=1; spritePalette=palette; break;
-          }
-        }
-      }
-      // Only set sprite-0 hit if NOT in leftmost 8px as per hardware
-      if(sprite0 && bgPx && spPx && (x>=0&&x<256 && y>=0&&y<240))
-        this.status |= 0x40;
+    renderPixel(x, y, bgLatch, spLatch) {
+  const idx = (y*256 + x) * 4;
+  const tileRow = (this.v & 0x7000) >> 12; // fine Y
+  const bgTile = (bgLatch >> (tileRow*4)) & 0x0F; // 0-3 bit, tile index
+  const bgPal = (bgLatch >> 32) & 0x03; // 0-1 bit, palette index
+  const colorIndex = this.ppuRead(0x3f00 + (bgPal*4) + bgTile);
+  let bgPx = ((bgLatch >> ((7 - this.x) * 4)) & 0x03) // 0-3
 
-      const cindex =
-        spriteOpaque && (!spritePriority||bgPx===0) ? 0x10+spritePalette+spPx :
-        bgPx ? colorIndex : this.palette[0];
-      const rgb=NTSC_PALETTE[cindex&0x3f];
-      img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255;
+  // FIX: Implement Background clipping (mask bit 2 = $04). If bit is 0, clip $00-$07.
+  if (x < 8 && !(this.mask & 0x04)) {
+      bgPx = 0;
+  }
+
+  // Determine sprite pixel
+  let spriteOpaque=0, spritePriority=0, spritePalette=0, spPx=0, sprite0=false;
+  for(let i=0; i<this.spriteCount; i++){
+    const sx = this.secOAM[i*4+3];
+    const sy = this.secOAM[i*4+0];
+    const tile = this.secOAM[i*4+1];
+    const attr = this.secOAM[i*4+2];
+
+    const h = (this.ctrl & 0x20) ? 16 : 8; // Sprite height
+    const row = y - sy; // Current line within the sprite
+    const flipH = (attr & 0x40);
+    const flipV = (attr & 0x80);
+    const priority = (attr & 0x20) >> 5; // 0=in front, 1=behind BG
+    const palette = (attr & 0x03);
+
+    if(x>=sx && x<sx+8){ // If current pixel falls within the sprite's X-range
+      let tx = x-sx; // pixel in tile (0-7)
+      let ty = row; // row in tile (0-7 for 8x8, 0-15 for 8x16)
+
+      // Vertical Flip
+      if(flipV) ty = h-1-ty;
+
+      // 8x16 sprite: bank selection and tile index
+      let bank = (tile & 1); // 0 or 1
+      let ptAddr = (bank * 0x1000) + (tile & ~1) * 16;
+      if(h===16){ // For 8x16 sprites
+        ptAddr = (bank * 0x1000) + ((tile & ~1) + (ty<8?0:1)) * 16; // select top/bottom tile
+        ty = ty & 7; // row within 8x8 tile
+      } else { // For 8x8 sprites
+        ptAddr = ((this.ctrl & 0x08) * 0x100) + tile * 16; // ctrl&0x08 is pattern table address bit
+      }
+
+      const tileAddr = ptAddr + ty;
+      // FIX 1: Use this.mapper.chrRead, since this.chrRead is undefined.
+      const lo = this.mapper.chrRead(tileAddr);
+      const hi = this.mapper.chrRead(tileAddr + 8);
+
+      let bit = flipH ? tx : 7 - tx;
+      spPx = ((hi>>bit)&1)<<1|((lo>>bit)&1); // Sprite pixel color index (0-3)
+
+      if(spPx){
+        spriteOpaque=1; spritePalette=palette; spritePriority=priority;
+        if(i===0) sprite0=true; // Sprite 0 hit check
+        break; // Found the highest priority opaque pixel, stop searching
+      }
     }
+  }
+
+  // FIX 2b: Sprite clipping (mask bit 3 = $08). If bit is 0, clip $00-$07.
+  if (x < 8 && !(this.mask & 0x08)) {
+      spPx = 0;
+      spriteOpaque = 0; // Clear the opaque flag as well
+  }
+
+  // FIX 3: Corrected Sprite-0 hit condition.
+  if (sprite0 && bgPx && spPx) {
+      const bgClipActive = !(this.mask & 0x04);
+      const spClipActive = !(this.mask & 0x08);
+      
+      // If X < 8 AND (bg clipping is active OR sprite clipping is active), suppress the hit.
+      if (x >= 8 || !(bgClipActive || spClipActive)) {
+          this.status |= 0x40;
+      }
+  }
+
+  const cindex = spriteOpaque && (!spritePriority||bgPx===0) ? 0x10+spritePalette+spPx : bgPx ? colorIndex : this.palette[0];
+  const rgb=NTSC_PALETTE[cindex&0x3f];
+  img[idx]=rgb[0]; img[idx+1]=rgb[1]; img[idx+2]=rgb[2]; img[idx+3]=255;
+}
  step() {  
     // Odd-frame cycle skip  
     if (  
