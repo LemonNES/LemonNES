@@ -1357,31 +1357,36 @@ class PPU {
       window.addEventListener('resize', resize);  
       resize();
     }
-    loadROM(bytes) {
-  
-  this.cart = new Cartridge(bytes);
-  this.ppu.connectCart(this.cart);
-  if (this.cart.mapper) {
-    // instantiate mapper instance if your code expects this
-    if (!this.cart.mapperInstance && typeof MapperFactory !== 'undefined') {
-      this.cart.mapperInstance = MapperFactory(this.cart, this.ppu);
+    async loadROM(arrayBuffer) {
+    // --- Parse iNES header ---
+    const rom = new NESROM(new Uint8Array(arrayBuffer));
+
+    // Create mapper BEFORE touching CPU/PPU
+    this.mapper = MapperFactory.create(rom);   // <-- Fix #1
+    if (!this.mapper) throw new Error("Unsupported mapper");
+
+    // Install mapper into CPU + PPU
+    this.cpu.mapper = this.mapper;             // <-- Fix #2
+    this.ppu.mapper = this.mapper;             // <-- Fix #3
+
+    // Load PRG ROM into mapper's PRG space
+    this.mapper.loadPRG(rom.prg);
+
+    // Load CHR ROM (or allocate CHR RAM)
+    if (rom.chr.length > 0) {
+        this.ppu.chr = new Uint8Array(rom.chr);  // CHR ROM
+    } else {
+        this.ppu.chr = new Uint8Array(0x2000);   // CHR RAM
     }
-    this.ppu.mapper = this.cart.mapperInstance || null;
-  }
 
-  // create bus & cpu & wire up (keep your existing wiring)
-  this.bus = new Bus(null, this.ppu, this.cart, this.input, this.apu);
-  this.cpu = new CPU6502(this.bus);
-  this.bus.cpu = this.cpu;
+    // Reset CPU + PPU *after mapper is installed*
+    this.cpu.reset();
+    this.ppu.reset();
 
-  // Reset CPU and PPU after cartridge is connected (CRITICAL)
-  this.cpu.reset();
-  this.ppu.reset();
+    // Start emulation (or signal ready)
+    this.running = true;
+}
 
-  // update UI
-  document.getElementById('mapper').textContent = this.cart.mapper;
-  document.getElementById('mirror').textContent = this.cart.mirror;
-}    
     reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
     step(){
       const cyc=this.cpu.step();
