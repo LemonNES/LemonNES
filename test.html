@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LemonNES</title>
+  <link rel="icon" type="image/jpeg" href="favicon.jpg">
+  <style>
+    :root { --bg:#0b0f14; --fg:#e8f0ff; --muted:#8aa0b6; --acc:#73d7ff; --card:#121926; }
+    html,body{ height:100%; margin:0; background:var(--bg); color:var(--fg); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; overflow-x: hidden; overflow-y: hidden; touch-action: none; }
+    body { min-height: 100vh; min-width: 100vw; }
+    .wrap{display:grid; grid-template-columns: 1fr 340px; gap:16px; padding:16px; box-sizing:border-box;}
+    header{grid-column: 1 / -1; display:flex; align-items:center; justify-content:space-between}
+    header h1{font-size:18px; margin:0; font-weight:600}
+    header .sub{color:var(--muted); font-size:12px}
+    .screen{background:#000; padding:8px; border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center;}
+    canvas{image-rendering: pixelated; image-rendering: crisp-edges; border-radius:12px; background:#000; touch-action:none;}
+    .side{background:var(--card); border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:12px;}
+    .row{display:flex; align-items:center; gap:10px;}
+    .row + .row{margin-top:10px}
+    label{font-size:12px; color:var(--muted)}
+    .stat{font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono"; color:#99b3cc}
+    button, input[type="file"]::file-selector-button{background:#1a2433; color:var(--fg); border:1px solid rgba(255,255,255,.08); padding:8px 10px; border-radius:12px; cursor:pointer}
+    button:disabled{opacity:.5; cursor:not-allowed}
+    .kbd{display:inline-block; padding:.1rem .4rem; border-radius:6px; background:#0e1624; border:1px solid rgba(255,255,255,.05); font:11px ui-monospace}
+    details{margin-top:10px}
+    summary{cursor:pointer; color:var(--acc)}
+    ul{margin:.25rem 0 .5rem 1.25rem}
+    .grid2{display:grid; grid-template-columns: 1fr 1fr; gap:6px}
+    .mobile-controls { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000; pointer-events:none; }
+    .mobile-controls.active { display: flex; pointer-events: auto; flex-direction: row; justify-content: space-between; width: 100vw; padding: 0 2vw 2vw 2vw; box-sizing: border-box; user-select: none; }
+    .dpad, .abpad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 4px; }
+    .abpad { grid-template-columns: 44px 44px; grid-template-rows: 44px 44px; gap: 16px; align-self: flex-end; }
+    .mobile-btn { background:rgba(60,90,200,0.28); border:1px solid #567; border-radius:16px; color:#e0e8ff; font-size:18px; font-family: ui-monospace; width:44px; height:44px; display:flex; align-items:center; justify-content:center; opacity:.92; transition:background .1s; touch-action:none; pointer-events: auto; user-select: none; }
+    .mobile-btn:active, .mobile-btn.pressed { background:rgba(80,180,255,0.55); color:#000; }
+    @media (max-width: 900px) {
+      .wrap { display: block; padding: 2vw; }
+      .side { margin-top: 20px; }
+      .screen { justify-content: center; }
+      canvas { width: 98vw !important; height: auto !important; max-width: 100vw; max-height: 70vw; }
+      .mobile-controls { display: flex !important; }
+    }
+    @media (pointer: coarse) { .mobile-controls { display: flex !important; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>LemonNES <span class="sub">- Fixed Rendering</span></h1>
+        <div class="sub">PPU Timing Fixes • MMC3 IRQs • Fast Core</div>
+      </div>
+      <div class="stat" id="build"></div>
+    </header>
+
+    <div class="screen">
+      <canvas id="screen" width="256" height="240" style="width:768px;height:720px"></canvas>
+    </div>
+
+    <aside class="side">
+      <div class="row">
+        <input id="rom" type="file" accept=".nes,application/octet-stream" />
+        <button id="btnRun" disabled>Run</button>
+        <button id="btnPause" disabled>Pause</button>
+        <button id="btnReset" disabled>Reset</button>
+      </div>
+      <div class="row stat">
+        <div>ROM: <span id="romName">—</span></div>
+      </div>
+      <div class="grid2 stat">
+        <div>FPS: <span id="fps">0</span></div>
+        <div>CPU: <span id="mhz">—</span></div>
+        <div>Mapper: <span id="mapper">—</span></div>
+        <div>Mirroring: <span id="mirror">—</span></div>
+      </div>
+
+      <details>
+        <summary>Controls</summary>
+        <ul>
+          <li>P1: <span class="kbd">Arrow Keys</span>, <span class="kbd">Z</span>=A, <span class="kbd">X</span>=B, <span class="kbd">Enter</span>=Start, <span class="kbd">Right Shift</span>=Select</li>
+          <li>Touch: Mobile controls are visible on touch devices</li>
+        </ul>
+      </details>
+    </aside>
+  </div>
+
+  <div class="mobile-controls" id="mobileControls" aria-hidden="true">
+    <div style="flex:1;">
+      <div class="dpad">
+        <div></div><button class="mobile-btn" data-key="ArrowUp" aria-label="Up">↑</button><div></div>
+        <button class="mobile-btn" data-key="ArrowLeft" aria-label="Left">←</button><div></div><button class="mobile-btn" data-key="ArrowRight" aria-label="Right">→</button>
+        <div></div><button class="mobile-btn" data-key="ArrowDown" aria-label="Down">↓</button><div></div>
+      </div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:flex-end;justify-content:flex-end;gap:8px;">
+      <div class="abpad">
+        <button class="mobile-btn" data-key="KeyZ" aria-label="A">A</button>
+        <button class="mobile-btn" data-key="KeyX" aria-label="B">B</button>
+        <button class="mobile-btn" data-key="Enter" aria-label="Start">St</button>
+        <button class="mobile-btn" data-key="ShiftRight" aria-label="Select">Sl</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const BUILD = new Date().toISOString().replace('T',' ').slice(0,19);
+  document.getElementById('build').textContent = `build ${BUILD}`;
+
+  const clamp=(v,min,max)=>v<min?min:v>max?max:v;
+  const u8 = n => n & 0xFF;
+  const u16 = n => n & 0xFFFF;
+  const toHex=(n,len=2)=>('0'.repeat(len)+n.toString(16).toUpperCase()).slice(-len);
+
+  // ===== Controllers =====
+  class Controllers{
+    constructor(){
+      this.state1=0; this.state2=0; this.latch=0; this.shift1=0; this.shift2=0;
+      this.keyMap = { 'KeyZ':0, 'KeyX':1, 'ShiftRight':2, 'Enter':3, 'ArrowUp':4,'ArrowDown':5,'ArrowLeft':6,'ArrowRight':7 };
+      this.bindKeys(); this.initMobile();
+    }
+    bindKeys(){
+      window.addEventListener('keydown',e=>{ if(e.repeat)return; if(this.keyMap[e.code]!==undefined){ this.state1|=(1<<this.keyMap[e.code]); e.preventDefault(); } });
+      window.addEventListener('keyup',e=>{ if(this.keyMap[e.code]!==undefined){ this.state1&=~(1<<this.keyMap[e.code]); e.preventDefault(); } });
+    }
+    write(v){ this.latch=v&1; if(this.latch){ this.shift1=this.state1; this.shift2=this.state2; } }
+    read1(){ const out=this.shift1&1; if(!this.latch)this.shift1=(this.shift1>>>1)|0x80; return out; }
+    read2(){ const out=this.shift2&1; if(!this.latch)this.shift2=(this.shift2>>>1)|0x80; return out; }
+    initMobile() {
+      const mc = document.getElementById('mobileControls'); if(!mc)return;
+      const chk = ()=>{ if('ontouchstart' in window || navigator.maxTouchPoints || window.innerWidth<900) mc.classList.add('active'); else mc.classList.remove('active'); };
+      window.addEventListener('resize', chk); chk();
+      mc.querySelectorAll('.mobile-btn').forEach(btn=>{
+        const bit=this.keyMap[btn.dataset.key]; if(bit===undefined)return;
+        const p=e=>{e.preventDefault(); this.state1|=(1<<bit); btn.classList.add('pressed');};
+        const r=e=>{e.preventDefault(); this.state1&=~(1<<bit); btn.classList.remove('pressed');};
+        btn.addEventListener('touchstart',p,{passive:false}); btn.addEventListener('touchend',r,{passive:false});
+        btn.addEventListener('mousedown',p); btn.addEventListener('mouseup',r); btn.addEventListener('mouseleave',r);
+        btn.addEventListener('contextmenu',e=>e.preventDefault());
+      });
+      mc.addEventListener('touchmove',e=>{if(e.target.classList.contains('mobile-btn'))e.preventDefault()}, {passive:false});
+    }
+  }
+
+  // ===== APU =====
+  class APU {
+    constructor() {
+      this.reg=new Uint8Array(0x18); this.frameStep=0; this.frameCounter=0; this.cycles=0;
+      this.pulse=[this.mkPulse(),this.mkPulse()]; this.tri={timer:0,phase:0,enabled:true,length:0,linear:0x7F,counter:0};
+      this.noise={timer:0,lfsr:1,volume:0x0F,enabled:true,length:0,env:0x0F,mode:0,period:0};
+      this.dmc={enabled:false,output:0,currentLen:0};
+      const AC = window.AudioContext || window.webkitAudioContext; this.ac=new AC();
+      this.node=this.ac.createScriptProcessor(2048,0,1);
+      this.node.onaudioprocess=e=>this.pullSamples(e.outputBuffer.getChannelData(0));
+      this.gain=this.ac.createGain(); this.gain.gain.value=0.15;
+      this.node.connect(this.gain).connect(this.ac.destination);
+      this.frameCounterRate=7457; this.divider=0; this.frameCounterMode=0;
+    }
+    mkPulse(){ return {timer:0,phase:0,duty:0,volume:0x0F,enabled:true,length:0,env:0x0F,constant:1,sweep:{enabled:false,period:0,shift:0,negate:false,reload:false}}; }
+    read(addr){
+      if(addr===0x4015){
+        let s=0; if(this.pulse[0].length)s|=1; if(this.pulse[1].length)s|=2; if(this.tri.length)s|=4; if(this.noise.length)s|=8; if(this.dmc.currentLen)s|=16; return s;
+      } return 0;
+    }
+    write(addr,v){
+      if(addr<0x4000 || addr>0x4017) return; this.reg[addr-0x4000]=v; const ch=(addr>>2)&1;
+      if(addr>=0x4000&&addr<=0x4007){ // Pulse
+        const p=this.pulse[ch]; const r=addr&3;
+        if(r===0){ p.duty=v>>6; p.constant=(v>>4)&1; p.volume=v&0xF; }
+        else if(r===1){ p.sweep.enabled=!!(v&0x80); p.sweep.period=(v>>4)&7; p.sweep.negate=!!(v&8); p.sweep.shift=v&7; p.sweep.reload=true; }
+        else if(r===2){ p.timer=(p.timer&0x700)|v; }
+        else { p.timer=(p.timer&0xFF)|((v&7)<<8); p.length=0x1F; p.phase=0; }
+      }
+      else if(addr===0x4008) this.tri.linear=v&0x7F;
+      else if(addr===0x400A) this.tri.timer=(this.tri.timer&0x700)|v;
+      else if(addr===0x400B) { this.tri.timer=(this.tri.timer&0xFF)|((v&7)<<8); this.tri.length=0x1F; this.tri.phase=0; }
+      else if(addr===0x400C) { this.noise.constant=(v>>4)&1; this.noise.volume=v&0xF; }
+      else if(addr===0x400E) { this.noise.mode=v>>7; this.noise.timer=[4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068][v&0xF]; }
+      else if(addr===0x400F) this.noise.length=0x1F;
+      else if(addr===0x4015) { this.pulse[0].enabled=v&1; this.pulse[1].enabled=v&2; this.tri.enabled=v&4; this.noise.enabled=v&8; }
+      else if(addr===0x4017) this.frameCounterMode=v>>7;
+    }
+    step(cycles){
+      this.divider+=cycles;
+      if(this.divider>=this.frameCounterRate){ this.divider-=this.frameCounterRate; this.frameCounter=(this.frameCounter+1)%(this.frameCounterMode?5:4); }
+      const adv=(ch,t)=>{ while(this.cycles>=t){this.cycles-=t; ch.phase=(ch.phase+1)&0x7FFF;} };
+      adv(this.pulse[0],2); adv(this.pulse[1],2); adv(this.tri,2); adv(this.noise,1);
+      if(this.noise.timer && (this.noise.phase&31)===0){
+        const b=(this.noise.lfsr^(this.noise.lfsr>>(this.noise.mode?6:1)))&1; this.noise.lfsr=(this.noise.lfsr>>1)|(b<<14);
+      }
+    }
+    pullSamples(out){
+      for(let i=0;i<out.length;i++){
+        const sq=ch=>{
+          if(!ch.enabled||!ch.length||ch.timer<8)return 0;
+          const duty=[8,4,2,1][ch.duty]; const per=(ch.timer+1)*16; const on=(ch.phase%per)<(per/duty);
+          return on?(ch.constant?ch.volume:ch.env)/15:0;
+        };
+        const p1=sq(this.pulse[0]), p2=sq(this.pulse[1]);
+        const tri=this.tri.enabled&&this.tri.length&&this.tri.timer>=2 ? (1-Math.abs(2*((this.tri.phase%((this.tri.timer+1)*32))/((this.tri.timer+1)*32))-1))*0.7 : 0;
+        const n=this.noise.enabled&&this.noise.length ? ((this.noise.lfsr&1?1:-1)*(this.noise.volume/15)*0.2) : 0;
+        out[i] = (p1+p2 ? 95.88/(8128/(p1+p2)+100) : 0) + (tri+n ? 159.79/(1/(tri/8227+n/12241)+100) : 0);
+      }
+    }
+  }
+
+  // ===== Mappers =====
+  class Mapper {
+    constructor(cart){this.cart=cart;}
+    prgRead(addr){return this.cart.prg[addr-0x8000];} prgWrite(addr,val){}
+    chrRead(addr){return this.cart.chr[addr];} chrWrite(addr,val){if(this.cart.chrRAM)this.cart.chr[addr]=val;}
+    mirroring(){return this.cart.mirror;}
+    a12_clock(){} 
+  }
+  class Mapper0 extends Mapper{
+    prgRead(a){return this.cart.prg[(this.cart.prg.length===0x4000 && a>=0xC000)?a-0xC000:a-0x8000];}
+  }
+  class Mapper1 extends Mapper{
+    constructor(c){super(c);this.shift=0x10;this.ctrl=0xC;this.prgBank=0;this.chrBank0=0;this.chrBank1=0;}
+    prgWrite(a,v){
+      if(v&0x80){this.shift=0x10;this.ctrl|=0xC;return;}
+      this.shift=(this.shift>>1)|((v&1)<<4);
+      if(this.shift&0x20){ 
+        const d=this.shift&0x1F; const r=(a>>13)&3; this.shift=0x10;
+        if(r===0){this.ctrl=d;this.cart.mirror=['horizontal','vertical','single0','single1'][d&3]||'horizontal';}
+        else if(r===1)this.chrBank0=d; else if(r===2)this.chrBank1=d; else this.prgBank=d&0xF;
+      }
+    }
+    prgRead(a){
+      const m=(this.ctrl>>2)&3;
+      if(m<=1) return this.cart.prg[(this.prgBank&0xE)*0x4000 + (a-0x8000)];
+      const last = this.cart.prg.length-0x4000;
+      if(m===2) return this.cart.prg[a<0xC000 ? (a-0x8000) : (this.prgBank*0x4000 + (a-0xC000))];
+      return this.cart.prg[a<0xC000 ? (this.prgBank*0x4000+(a-0x8000)) : (last+(a-0xC000))];
+    }
+    chrRead(a){ const m=(this.ctrl>>4)&1; if(!m)return this.cart.chr[(this.chrBank0&0x1E)*0x1000+a]; return this.cart.chr[(a<0x1000?this.chrBank0:this.chrBank1)*0x1000+(a&0xFFF)]; }
+  }
+  class Mapper2 extends Mapper{
+    constructor(c){super(c);this.bank=0;} prgWrite(a,v){this.bank=v&0xF;}
+    prgRead(a){if(a<0xC000)return this.cart.prg[this.bank*0x4000+(a-0x8000)]; return this.cart.prg[this.cart.prg.length-0x4000+(a-0xC000)];}
+  }
+  class Mapper3 extends Mapper{
+    constructor(c){super(c);this.cBank=0;} prgWrite(a,v){this.cBank=v&3;}
+    chrRead(a){return this.cart.chr[this.cBank*0x2000+a];}
+  }
+  class Mapper4 extends Mapper {
+    constructor(cart, nes) { super(cart); this.nes=nes; this.regs=new Uint8Array(8); this.bkSel=0; this.prgMode=0; this.chrMode=0; this.irqL=0; this.irqC=0; this.irqE=false; }
+    a12_clock() {
+      if(this.irqC===0) this.irqC=this.irqL; else this.irqC--;
+      if(this.irqC===0 && this.irqE) this.nes.cpu.triggerIRQ();
+    }
+    prgWrite(a,v) {
+      if(a<0xA000) { if(a&1)this.regs[this.bkSel]=v; else {this.bkSel=v&7; this.prgMode=v>>6; this.chrMode=v>>7;} }
+      else if(a<0xC000) { if(!(a&1)) this.nes.ppu.setMirroring(v&1); }
+      else if(a<0xE000) { if(a&1)this.irqC=0; else this.irqL=v; }
+      else { this.irqE=!!(a&1); if(!this.irqE)this.nes.cpu.clearIRQ(); }
+    }
+    prgRead(a) {
+      const L=this.cart.prg.length, b2=b=>(b*0x2000)%L;
+      if(a<0xA000) return this.cart.prg[(this.prgMode?L-0x2000:b2(this.regs[6])) + (a-0x8000)];
+      if(a<0xC000) return this.cart.prg[b2(this.regs[7])+(a-0xA000)];
+      if(a<0xE000) return this.cart.prg[(this.prgMode?b2(this.regs[6]):L-0x2000) + (a-0xC000)];
+      return this.cart.prg[L-0x2000+(a-0xE000)];
+    }
+    chrRead(a) {
+      const b1=b=>(b*0x400)%(this.cart.chr.length), R=this.regs;
+      let bk=0;
+      if(this.chrMode===0) {
+        if(a<0x800) bk=a<0x400?R[0]:R[0]+1; else if(a<0x1000) bk=a<0xC00?R[1]:R[1]+1;
+        else if(a<0x1400) bk=R[2]; else if(a<0x1800) bk=R[3]; else if(a<0x1C00) bk=R[4]; else bk=R[5];
+      } else {
+        if(a<0x400) bk=R[2]; else if(a<0x800) bk=R[3]; else if(a<0xC00) bk=R[4]; else if(a<0x1000) bk=R[5];
+        else if(a<0x1800) bk=a<0x1400?R[0]:R[0]+1; else bk=a<0x1C00?R[1]:R[1]+1;
+      }
+      return this.cart.chr[b1(bk)+(a&0x3FF)];
+    }
+  }
+
+  // ===== Cartridge =====
+  class Cartridge{
+    constructor(bytes){
+      if(bytes[0]!==0x4E) throw new Error('Invalid ROM');
+      const prgBanks=bytes[4], chrBanks=bytes[5];
+      this.mapper=(bytes[7]&0xF0)|(bytes[6]>>4);
+      this.mirror=(bytes[6]&1)?'vertical':'horizontal';
+      if(bytes[6]&8) this.mirror='four';
+      const prgSz=prgBanks*16384, chrSz=chrBanks*8192;
+      const off=16+(bytes[6]&4?512:0);
+      this.prg=bytes.slice(off,off+prgSz);
+      this.chr=chrSz?bytes.slice(off+prgSz,off+prgSz+chrSz):new Uint8Array(8192);
+      this.chrRAM=chrSz===0; this.sram=new Uint8Array(0x2000);
+    }
+  }
+
+  // ===== Bus =====
+  class Bus {
+    constructor(cpu, ppu, cart, input, apu){
+      this.cpu=cpu; this.ppu=ppu; this.cart=cart; this.input=input; this.apu=apu;
+      this.ram=new Uint8Array(0x800);
+      if(cart.mapper===1) this.mapper=new Mapper1(cart);
+      else if(cart.mapper===2) this.mapper=new Mapper2(cart);
+      else if(cart.mapper===3) this.mapper=new Mapper3(cart);
+      else if(cart.mapper===4) this.mapper=new Mapper4(cart, cpu.nes);
+      else this.mapper=new Mapper0(cart);
+      this.ppu.mapper = this.mapper; 
+      this.cpu.mapper = this.mapper;
+    }
+    cpuRead(a){
+      if(a<0x2000) return this.ram[a&0x7FF];
+      if(a<0x4000) return this.ppu.read(0x2000+(a&7));
+      if(a===0x4015) return this.apu.read(a);
+      if(a===0x4016) return this.input.read1();
+      if(a===0x4017) return this.input.read2();
+      if(a>=0x6000 && a<0x8000) return this.cart.sram[a-0x6000];
+      if(a>=0x8000) return this.mapper.prgRead(a);
+      return 0;
+    }
+    cpuWrite(a,v){
+      if(a<0x2000) { this.ram[a&0x7FF]=v; return; }
+      if(a<0x4000) { this.ppu.write(0x2000+(a&7),v); return; }
+      if(a===0x4014) {
+        const p=v<<8, b=new Uint8Array(256); for(let i=0;i<256;i++)b[i]=this.cpuRead(p+i);
+        this.ppu.doDMA(b); this.cpu.stall+=513+(this.cpu.cycles%2); return;
+      }
+      if(a===0x4016) { this.input.write(v); return; }
+      if(a>=0x4000 && a<=0x4017) { this.apu.write(a,v); return; }
+      if(a>=0x6000 && a<0x8000) { this.cart.sram[a-0x6000]=v; return; }
+      if(a>=0x8000) this.mapper.prgWrite(a,v);
+    }
+  }
+
+  // ===== PPU =====
+  class PPU {
+    constructor(){
+      this.v=0; this.t=0; this.x=0; this.w=0; this.ctrl=0; this.mask=0; this.status=0; this.oamaddr=0;
+      this.oam=new Uint8Array(256); this.secOAM=new Uint8Array(32); this.spriteCount=0;
+      this.scanline=261; this.cycle=0; this.frame=0; this.nmi=false; this.oddFrame=false;
+      this.buffered=0; this.openBus=0; this.vram=new Uint8Array(0x800); this.palette=new Uint8Array(32);
+      this.bgLatch={lo:0,hi:0,pal:0}; this.a12=0; this.mapper=null; this.bus=null; 
+      this.spriteZeroInLine=false;
+    }
+    attachCanvas(c){ this.ctx=c.getContext("2d",{alpha:false,willReadFrequently:true}); this.img=this.ctx.createImageData(256,240); }
+    setMirroring(m){ this.mirror=m?'horizontal':'vertical'; }
+    reset(){ this.v=this.t=this.x=this.w=0; this.ctrl=this.mask=this.status=0; this.scanline=261; this.cycle=0; this.buffered=0; }
+    read(a){
+      if(a===0x2002){
+        const r=(this.status&0xE0)|(this.openBus&0x1F);
+        this.status&=~0x80; this.w=0; this.openBus=r; return r;
+      }
+      if(a===0x2004) return this.oam[this.oamaddr];
+      if(a===0x2007){
+        let d=this.buffered, va=this.v&0x3FFF;
+        if(va>=0x3F00) { d=this.ppuread(va); this.buffered=this.ppuread(va-0x1000); }
+        else this.buffered=this.ppuread(va);
+        this.v+=(this.ctrl&4?32:1); this.openBus=d; return d;
+      }
+      return this.openBus;
+    }
+    write(a,v){
+      this.openBus=v;
+      if(a===0x2000){ this.ctrl=v; this.t=(this.t&0xF3FF)|((v&3)<<10); }
+      else if(a===0x2001) this.mask=v;
+      else if(a===0x2003) this.oamaddr=v;
+      else if(a===0x2004) this.oam[this.oamaddr++]=v;
+      else if(a===0x2005){
+        if(!this.w){ this.x=v&7; this.t=(this.t&0x7FE0)|(v>>3); this.w=1; }
+        else{ this.t=(this.t&0x0C1F)|((v&7)<<12)|((v&0xF8)<<2); this.w=0; }
+      }
+      else if(a===0x2006){
+        if(!this.w){ this.t=(this.t&0xFF)|((v&0x3F)<<8); this.w=1; }
+        else{ this.t=(this.t&0x7F00)|v; this.v=this.t; this.w=0; }
+      }
+      else if(a===0x2007){ this.ppuwrite(this.v,v); this.v+=(this.ctrl&4?32:1); }
+    }
+    doDMA(buf){ for(let i=0;i<256;i++)this.oam[(this.oamaddr+i)&0xFF]=buf[i]; }
+    
+    ntIdx(a){
+      const n=(a>>10)&3, o=a&0x3FF, m=this.mirror||this.mapper.mirroring;
+      if(m==='vertical') return (n&1)*0x400+o;
+      if(m==='horizontal') return ((n>>1)&1)*0x400+o;
+      if(m==='four') return a&0xFFF;
+      return o; 
+    }
+    ppuread(a){
+      a&=0x3FFF; if(a<0x2000) return this.mapper.chrRead(a);
+      if(a<0x3F00) return this.vram[this.ntIdx(a)];
+      const p=a&0x1F; return this.palette[(p&3)?p:0];
+    }
+    ppuwrite(a,v){
+      a&=0x3FFF; if(a<0x2000) return this.mapper.chrWrite(a,v);
+      if(a<0x3F00) { this.vram[this.ntIdx(a)]=v; return; }
+      const p=a&0x1F; this.palette[(p&3)?p:0]=v;
+    }
+
+    step(){
+      if(this.mask&0x18 && this.mapper.a12_clock){
+        const bit = (this.v&0x1000)>>12;
+        if(bit && !this.a12) this.mapper.a12_clock();
+        this.a12=bit;
+      }
+      
+      const sl=this.scanline, cy=this.cycle;
+      if(sl===261 && cy===339 && (this.mask&0x18) && this.oddFrame){ this.cycle++; this.oddFrame=false; return; }
+      
+      if(sl<240 || sl===261){
+        if(sl===261 && cy===1) this.status&=~0xE0; 
+        if((cy>=1 && cy<=256) || (cy>=321 && cy<=336)){
+          if((cy&7)===0) { 
+            if((this.v&0x1F)===31){ this.v&=~0x1F; this.v^=0x400; } else this.v++;
+          }
+          if(cy===256) { 
+             if((this.v&0x7000)!==0x7000) this.v+=0x1000;
+             else { this.v&=~0x7000; let y=(this.v&0x3E0)>>5; if(y===29){y=0;this.v^=0x800;} else if(y===31)y=0; else y++; this.v=(this.v&~0x3E0)|(y<<5); }
+          }
+        }
+        if(cy===257) this.v=(this.v&~0x41F)|(this.t&0x41F); 
+        if(sl===261 && cy>=280 && cy<=304 && (this.mask&0x18)) this.v=(this.v&~0x7BE0)|(this.t&0x7BE0);
+        
+        if(cy===1 && sl<240) this.evalSprites(); 
+        if(sl<240 && cy>=1 && cy<=256) this.pixel(cy-1, sl);
+      }
+
+      if(sl===241 && cy===1){
+         this.status|=0x80; 
+         if(this.ctrl&0x80) this.nmi=true;
+         this.ctx.putImageData(this.img,0,0);
+      }
+
+      this.cycle++;
+      if(this.cycle>340){
+        this.cycle=0; this.scanline++;
+        if(this.scanline>261){ this.scanline=0; this.frame++; this.oddFrame=!this.oddFrame; }
+      }
+    }
+
+    evalSprites() {
+      let y=this.scanline; this.spriteCount=0; this.spriteZeroInLine=false;
+      for(let i=0;i<64;i++){
+          let o=i*4, sy=this.oam[o], h=(this.ctrl&0x20)?16:8;
+          let row=y-sy;
+          if(row>=0 && row<h && this.spriteCount<8){
+              if(i===0) this.spriteZeroInLine=true;
+              this.secOAM.set(this.oam.subarray(o,o+4), this.spriteCount*4);
+              this.spriteCount++;
+          }
+      }
+    }
+
+    bgFetch() {
+      let v=this.v, nt=0x2000|(v&0xFFF), at=0x23C0|(v&0xC00)|((v>>4)&0x38)|((v>>2)&7);
+      let t=this.ppuread(nt), a=this.ppuread(at), fy=(v>>12)&7;
+      let p=((a>>(((v>>4)&4)|(v&2)))&3)<<2, base=(this.ctrl&16)?0x1000:0;
+      let l=this.ppuread(base+t*16+fy), h=this.ppuread(base+t*16+fy+8);
+      return {lo:l, hi:h, pal:p};
+    }
+
+    pixel(x,y) { 
+      if(this.mask&0x18 && x<256 && y<240){
+         let bgIdx=0, spIdx=0, spPal=0, pri=0, s0=false;
+         if(this.mask&8){
+             if((x&7)===0) this.bgLatch=this.bgFetch();
+             let bit=7-(x&7);
+             let col=((this.bgLatch.hi>>bit)&1)<<1 | ((this.bgLatch.lo>>bit)&1);
+             if(col) bgIdx=this.bgLatch.pal+col;
+         }
+         if(this.mask&16){
+             for(let i=0;i<this.spriteCount;i++){
+                 let o=i*4, sx=this.secOAM[o+3];
+                 if(x>=sx && x<sx+8){
+                     let attr=this.secOAM[o+2], t=this.secOAM[o+1], sy=this.secOAM[o];
+                     let row=y-sy, h=(this.ctrl&32)?16:8;
+                     if(attr&0x80) row=h-1-row; 
+                     let base=(this.ctrl&8)?0x1000:0;
+                     if(h===16){ base=(t&1)?0x1000:0; t&=0xFE; if(row>7){t++; row-=8;} }
+                     let lo=this.ppuread(base+t*16+row), hi=this.ppuread(base+t*16+row+8);
+                     let bit=(attr&0x40)?(x-sx):(7-(x-sx));
+                     let c=((hi>>bit)&1)<<1|((lo>>bit)&1);
+                     if(c){ spIdx=c; spPal=(attr&3)+4; pri=(attr>>5)&1; if(this.spriteZeroInLine&&i===0)s0=true; break; }
+                 }
+             }
+         }
+         if(spIdx && bgIdx && s0 && x<255) this.status|=0x40;
+         let c = (spIdx && (!pri || !bgIdx)) ? (0x10+(spPal<<2)+spIdx) : (bgIdx ? (0x10+bgIdx) : this.palette[0]);
+         if((x<8 && !(this.mask&2)) || (x<8 && !(this.mask&4) && spIdx)) c=this.palette[0]; 
+         c = this.palette[c&0x1F]&0x3F;
+         const rgb=PALETTE[c]; const i=(y*256+x)*4;
+         this.img.data[i]=rgb[0]; this.img.data[i+1]=rgb[1]; this.img.data[i+2]=rgb[2]; this.img.data[i+3]=255;
+      }
+    }
+  }
+
+  const PALETTE=[
+    [124,124,124],[0,0,252],[0,0,188],[68,40,188],[148,0,132],[168,0,32],[168,16,0],[136,20,0],[80,48,0],[0,120,0],[0,104,0],[0,88,0],[0,64,88],[0,0,0],[0,0,0],[0,0,0],
+    [188,188,188],[0,120,248],[0,88,248],[104,68,252],[216,0,204],[228,0,88],[248,56,0],[228,92,16],[172,124,0],[0,184,0],[0,168,0],[0,168,68],[0,136,136],[0,0,0],[0,0,0],[0,0,0],
+    [248,248,248],[60,188,252],[104,136,252],[152,120,248],[248,120,248],[248,88,152],[248,120,88],[252,160,68],[248,184,0],[184,248,24],[88,216,84],[88,248,152],[0,232,216],[120,120,120],[0,0,0],[0,0,0],
+    [252,252,252],[164,228,252],[184,184,248],[216,184,248],[248,184,248],[248,164,192],[240,208,176],[252,224,168],[248,216,120],[216,248,120],[184,248,184],[184,248,216],[0,252,252],[248,216,248],[0,0,0],[0,0,0]
+  ];
+
+  // ===== CPU =====
+  class CPU6502{
+    constructor(bus, nes){ this.bus=bus; this.nes=nes; this.reset(); }
+    reset(){ this.a=0; this.x=0; this.y=0; this.sp=0xFD; this.p=0x24; this.pc=this.read(0xFFFC)|(this.read(0xFFFD)<<8); this.cycles=0; this.stall=0; this.irqPending=false; }
+    read(a){return this.bus.cpuRead(a);} write(a,v){this.bus.cpuWrite(a,v);}
+    push(v){this.write(0x100+this.sp,v); this.sp=(this.sp-1)&0xFF;} pop(){this.sp=(this.sp+1)&0xFF; return this.read(0x100+this.sp);}
+    flags(){return {c:this.p&1, z:(this.p>>1)&1, i:(this.p>>2)&1, d:(this.p>>3)&1, b:(this.p>>4)&1, v:(this.p>>6)&1, n:(this.p>>7)&1};}
+    setFlag(f,v){ if(v)this.p|=f; else this.p&=~f; }
+    setZN(v){ this.setFlag(2,(v&0xFF)===0); this.setFlag(128,v&0x80); }
+    triggerIRQ(){ this.irqPending=true; } clearIRQ(){ this.irqPending=false; }
+    
+    nmi(){ this.push(this.pc>>8); this.push(this.pc&0xFF); this.setFlag(16,0); this.push(this.p&0xEF); this.setFlag(4,1); this.pc=this.read(0xFFFA)|(this.read(0xFFFB)<<8); this.cycles+=7; }
+    irq(){ this.push(this.pc>>8); this.push(this.pc&0xFF); this.setFlag(16,0); this.push(this.p&0xEF); this.setFlag(4,1); this.pc=this.read(0xFFFE)|(this.read(0xFFFF)<<8); this.cycles+=7; }
+
+    step(){
+      if(this.stall>0){this.stall--; return 1;}
+      if(this.irqPending && !(this.p&4)){ this.irq(); this.irqPending=false; return 7; }
+      
+      const op=this.read(this.pc++); const O=OPCODES[op];
+      if(!O) return 1; 
+      const mode=O.mode; let addr=0, pc=this.pc;
+      
+      const rd=a=>this.read(a), r16=a=>rd(a)|(rd(a+1)<<8);
+      switch(mode){
+        case 'IMM': addr=this.pc++; break;
+        case 'ZP0': addr=rd(this.pc++); break;
+        case 'ZPX': addr=(rd(this.pc++)+this.x)&0xFF; break;
+        case 'ZPY': addr=(rd(this.pc++)+this.y)&0xFF; break;
+        case 'ABS': addr=r16(this.pc); this.pc+=2; break;
+        case 'ABX': addr=(r16(this.pc)+this.x)&0xFFFF; this.pc+=2; break;
+        case 'ABY': addr=(r16(this.pc)+this.y)&0xFFFF; this.pc+=2; break;
+        case 'IZX': {const d=(rd(this.pc++)+this.x)&0xFF; addr=rd(d)|(rd((d+1)&0xFF)<<8); break;}
+        case 'IZY': {const d=rd(this.pc++); const lo=rd(d), hi=rd((d+1)&0xFF); addr=(lo|(hi<<8))+this.y; break;}
+        case 'IND': {const t=r16(this.pc); this.pc+=2; addr=rd(t)|(rd((t&0xFF00)|((t+1)&0xFF))<<8); break;}
+        case 'REL': {const o=rd(this.pc++); addr=(o<0x80)?pc+o:pc+o-256;} break;
+      }
+      
+      const ins=O.ins; 
+      switch(ins){
+        case 'LDA': this.a=rd(addr); this.setZN(this.a); break;
+        case 'LDX': this.x=rd(addr); this.setZN(this.x); break;
+        case 'LDY': this.y=rd(addr); this.setZN(this.y); break;
+        case 'STA': this.write(addr,this.a); break;
+        case 'STX': this.write(addr,this.x); break;
+        case 'STY': this.write(addr,this.y); break;
+        case 'TAX': this.x=this.a; this.setZN(this.x); break;
+        case 'TAY': this.y=this.a; this.setZN(this.y); break;
+        case 'TXA': this.a=this.x; this.setZN(this.a); break;
+        case 'TYA': this.a=this.y; this.setZN(this.a); break;
+        case 'TSX': this.x=this.sp; this.setZN(this.x); break;
+        case 'TXS': this.sp=this.x; break;
+        case 'PHA': this.push(this.a); break;
+        case 'PHP': this.push(this.p|0x10); break;
+        case 'PLA': this.a=this.pop(); this.setZN(this.a); break;
+        case 'PLP': this.p=(this.pop()&0xEF)|0x20; break;
+        case 'AND': this.a&=rd(addr); this.setZN(this.a); break;
+        case 'ORA': this.a|=rd(addr); this.setZN(this.a); break;
+        case 'EOR': this.a^=rd(addr); this.setZN(this.a); break;
+        case 'BIT': {const m=rd(addr); this.setFlag(64,m&64); this.setFlag(128,m&128); this.setFlag(2,(this.a&m)===0);} break;
+        case 'ADC': {const m=rd(addr), c=this.p&1, r=this.a+m+c; this.setFlag(64,~((this.a^m))&(this.a^r)&0x80); this.setFlag(1,r>0xFF); this.a=r&0xFF; this.setZN(this.a);} break;
+        case 'SBC': {const m=rd(addr)^0xFF, c=this.p&1, r=this.a+m+c; this.setFlag(64,~((this.a^m))&(this.a^r)&0x80); this.setFlag(1,r>0xFF); this.a=r&0xFF; this.setZN(this.a);} break;
+        case 'CMP': {const m=rd(addr), r=this.a-m; this.setFlag(1,this.a>=m); this.setZN(r);} break;
+        case 'CPX': {const m=rd(addr), r=this.x-m; this.setFlag(1,this.x>=m); this.setZN(r);} break;
+        case 'CPY': {const m=rd(addr), r=this.y-m; this.setFlag(1,this.y>=m); this.setZN(r);} break;
+        case 'INC': {const r=(rd(addr)+1)&0xFF; this.write(addr,r); this.setZN(r);} break;
+        case 'DEC': {const r=(rd(addr)-1)&0xFF; this.write(addr,r); this.setZN(r);} break;
+        case 'INX': this.x=(this.x+1)&0xFF; this.setZN(this.x); break;
+        case 'INY': this.y=(this.y+1)&0xFF; this.setZN(this.y); break;
+        case 'DEX': this.x=(this.x-1)&0xFF; this.setZN(this.x); break;
+        case 'DEY': this.y=(this.y-1)&0xFF; this.setZN(this.y); break;
+        case 'ASL': {let v=(mode==='IMP')?this.a:rd(addr); this.setFlag(1,v&128); v=(v<<1)&0xFF; this.setZN(v); if(mode==='IMP')this.a=v; else this.write(addr,v);} break;
+        case 'LSR': {let v=(mode==='IMP')?this.a:rd(addr); this.setFlag(1,v&1); v=v>>1; this.setZN(v); if(mode==='IMP')this.a=v; else this.write(addr,v);} break;
+        case 'ROL': {let v=(mode==='IMP')?this.a:rd(addr), c=this.p&1; this.setFlag(1,v&128); v=((v<<1)|c)&0xFF; this.setZN(v); if(mode==='IMP')this.a=v; else this.write(addr,v);} break;
+        case 'ROR': {let v=(mode==='IMP')?this.a:rd(addr), c=this.p&1; this.setFlag(1,v&1); v=(v>>1)|(c<<7); this.setZN(v); if(mode==='IMP')this.a=v; else this.write(addr,v);} break;
+        case 'JMP': this.pc=addr; break;
+        case 'JSR': {const t=this.pc-1; this.push(t>>8); this.push(t&0xFF); this.pc=addr;} break;
+        case 'RTS': {const lo=this.pop(), hi=this.pop(); this.pc=((hi<<8)|lo)+1;} break;
+        case 'BRK': this.pc++; this.push(this.pc>>8); this.push(this.pc&0xFF); this.setFlag(16,1); this.push(this.p|0x10); this.setFlag(4,1); this.pc=r16(0xFFFE); break;
+        case 'RTI': this.p=(this.pop()&0xEF)|0x20; this.pc=this.pop()|(this.pop()<<8); break;
+        case 'BCC': if(!(this.p&1)){this.cycles++; this.pc=addr;} break;
+        case 'BCS': if(this.p&1){this.cycles++; this.pc=addr;} break;
+        case 'BEQ': if(this.p&2){this.cycles++; this.pc=addr;} break;
+        case 'BNE': if(!(this.p&2)){this.cycles++; this.pc=addr;} break;
+        case 'BVC': if(!(this.p&64)){this.cycles++; this.pc=addr;} break;
+        case 'BVS': if(this.p&64){this.cycles++; this.pc=addr;} break;
+        case 'BPL': if(!(this.p&128)){this.cycles++; this.pc=addr;} break;
+        case 'BMI': if(this.p&128){this.cycles++; this.pc=addr;} break;
+        case 'CLC': this.setFlag(1,0); break;
+        case 'SEC': this.setFlag(1,1); break;
+        case 'CLI': this.setFlag(4,0); break;
+        case 'SEI': this.setFlag(4,1); break;
+        case 'CLV': this.setFlag(64,0); break;
+        case 'CLD': this.setFlag(8,0); break;
+        case 'SED': this.setFlag(8,1); break;
+        case 'NOP': break;
+      }
+      return O.cyc;
+    }
+  }
+
+  const OPCODES = new Array(256);
+  const OPS = [
+    [0x00,'IMP','BRK',7],[0xEA,'IMP','NOP',2],
+    [0xA9,'IMM','LDA',2],[0xA5,'ZP0','LDA',3],[0xB5,'ZPX','LDA',4],[0xAD,'ABS','LDA',4],[0xBD,'ABX','LDA',4],[0xB9,'ABY','LDA',4],[0xA1,'IZX','LDA',6],[0xB1,'IZY','LDA',5],
+    [0xA2,'IMM','LDX',2],[0xA6,'ZP0','LDX',3],[0xB6,'ZPY','LDX',4],[0xAE,'ABS','LDX',4],[0xBE,'ABY','LDX',4],
+    [0xA0,'IMM','LDY',2],[0xA4,'ZP0','LDY',3],[0xB4,'ZPX','LDY',4],[0xAC,'ABS','LDY',4],[0xBC,'ABX','LDY',4],
+    [0x85,'ZP0','STA',3],[0x95,'ZPX','STA',4],[0x8D,'ABS','STA',4],[0x9D,'ABX','STA',5],[0x99,'ABY','STA',5],[0x81,'IZX','STA',6],[0x91,'IZY','STA',6],
+    [0x86,'ZP0','STX',3],[0x96,'ZPY','STX',4],[0x8E,'ABS','STX',4],
+    [0x84,'ZP0','STY',3],[0x94,'ZPX','STY',4],[0x8C,'ABS','STY',4],
+    [0xAA,'IMP','TAX',2],[0xA8,'IMP','TAY',2],[0x8A,'IMP','TXA',2],[0x98,'IMP','TYA',2],
+    [0xBA,'IMP','TSX',2],[0x9A,'IMP','TXS',2],
+    [0x48,'IMP','PHA',3],[0x08,'IMP','PHP',3],[0x68,'IMP','PLA',4],[0x28,'IMP','PLP',4],
+    [0x29,'IMM','AND',2],[0x25,'ZP0','AND',3],[0x35,'ZPX','AND',4],[0x2D,'ABS','AND',4],[0x3D,'ABX','AND',4],[0x39,'ABY','AND',4],[0x21,'IZX','AND',6],[0x31,'IZY','AND',5],
+    [0x09,'IMM','ORA',2],[0x05,'ZP0','ORA',3],[0x15,'ZPX','ORA',4],[0x0D,'ABS','ORA',4],[0x1D,'ABX','ORA',4],[0x19,'ABY','ORA',4],[0x01,'IZX','ORA',6],[0x11,'IZY','ORA',5],
+    [0x49,'IMM','EOR',2],[0x45,'ZP0','EOR',3],[0x55,'ZPX','EOR',4],[0x4D,'ABS','EOR',4],[0x5D,'ABX','EOR',4],[0x59,'ABY','EOR',4],[0x41,'IZX','EOR',6],[0x51,'IZY','EOR',5],
+    [0x69,'IMM','ADC',2],[0x65,'ZP0','ADC',3],[0x75,'ZPX','ADC',4],[0x6D,'ABS','ADC',4],[0x7D,'ABX','ADC',4],[0x79,'ABY','ADC',4],[0x61,'IZX','ADC',6],[0x71,'IZY','ADC',5],
+    [0xE9,'IMM','SBC',2],[0xE5,'ZP0','SBC',3],[0xF5,'ZPX','SBC',4],[0xED,'ABS','SBC',4],[0xFD,'ABX','SBC',4],[0xF9,'ABY','SBC',4],[0xE1,'IZX','SBC',6],[0xF1,'IZY','SBC',5],
+    [0xC9,'IMM','CMP',2],[0xC5,'ZP0','CMP',3],[0xD5,'ZPX','CMP',4],[0xCD,'ABS','CMP',4],[0xDD,'ABX','CMP',4],[0xD9,'ABY','CMP',4],[0xC1,'IZX','CMP',6],[0xD1,'IZY','CMP',5],
+    [0xE0,'IMM','CPX',2],[0xE4,'ZP0','CPX',3],[0xEC,'ABS','CPX',4],
+    [0xC0,'IMM','CPY',2],[0xC4,'ZP0','CPY',3],[0xCC,'ABS','CPY',4],
+    [0xE6,'ZP0','INC',5],[0xF6,'ZPX','INC',6],[0xEE,'ABS','INC',6],[0xFE,'ABX','INC',7],
+    [0xC6,'ZP0','DEC',5],[0xD6,'ZPX','DEC',6],[0xCE,'ABS','DEC',6],[0xDE,'ABX','DEC',7],
+    [0xE8,'IMP','INX',2],[0xC8,'IMP','INY',2],[0xCA,'IMP','DEX',2],[0x88,'IMP','DEY',2],
+    [0x0A,'IMP','ASL',2],[0x06,'ZP0','ASL',5],[0x16,'ZPX','ASL',6],[0x0E,'ABS','ASL',6],[0x1E,'ABX','ASL',7],
+    [0x4A,'IMP','LSR',2],[0x46,'ZP0','LSR',5],[0x56,'ZPX','LSR',6],[0x4E,'ABS','LSR',6],[0x5E,'ABX','LSR',7],
+    [0x2A,'IMP','ROL',2],[0x26,'ZP0','ROL',5],[0x36,'ZPX','ROL',6],[0x2E,'ABS','ROL',6],[0x3E,'ABX','ROL',7],
+    [0x6A,'IMP','ROR',2],[0x66,'ZP0','ROR',5],[0x76,'ZPX','ROR',6],[0x6E,'ABS','ROR',6],[0x7E,'ABX','ROR',7],
+    [0x24,'ZP0','BIT',3],[0x2C,'ABS','BIT',4],
+    [0x4C,'ABS','JMP',3],[0x6C,'IND','JMP',5],
+    [0x20,'ABS','JSR',6],[0x60,'IMP','RTS',6],[0x40,'IMP','RTI',6],
+    [0x90,'REL','BCC',2],[0xB0,'REL','BCS',2],[0xF0,'REL','BEQ',2],[0x30,'REL','BMI',2],[0xD0,'REL','BNE',2],[0x10,'REL','BPL',2],[0x50,'REL','BVC',2],[0x70,'REL','BVS',2],
+    [0x18,'IMP','CLC',2],[0x38,'IMP','SEC',2],[0x58,'IMP','CLI',2],[0x78,'IMP','SEI',2],[0xB8,'IMP','CLV',2],[0xD8,'IMP','CLD',2],[0xF8,'IMP','SED',2],
+  ];
+  OPS.forEach(o=>OPCODES[o[0]]={mode:o[1],ins:o[2],cyc:o[3]});
+
+  // ===== NES =====
+  class NES{
+    constructor(canvas){
+      this.ppu=new PPU(); this.ppu.attachCanvas(canvas);
+      this.input=new Controllers(); this.apu=new APU();
+      this.running=false; this.last=0; this.fps=0; this.fc=0; this.lastFps=0;
+    }
+    loadROM(bytes){
+      this.cart=new Cartridge(bytes);
+      this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu);
+      this.cpu=new CPU6502(this.bus, this);
+      this.bus.cpu=this.cpu; 
+      this.ppu.bus=this.bus; this.ppu.mapper=this.bus.mapper;
+      this.cpu.reset(); this.ppu.reset();
+      document.getElementById('mapper').textContent=this.cart.mapper;
+      document.getElementById('mirror').textContent=this.cart.mirror;
+      document.getElementById('btnRun').disabled=false;
+      document.getElementById('btnReset').disabled=false;
+    }
+    run(){
+      if(this.running)return; this.running=true;
+      let last=performance.now(), pending=0;
+      const step=()=>{
+        if(!this.running)return;
+        const now=performance.now(), dt=Math.min(now-last,1000); last=now;
+        pending+=dt;
+        let frames=Math.floor(pending/16.66); pending-=frames*16.66;
+        if(frames>3)frames=3;
+        while(frames--){
+          let cycles=0;
+          while(cycles<29780){
+            const c=this.cpu.step(); cycles+=c;
+            const p=c*3;
+            for(let i=0;i<p;i++) this.ppu.step(); 
+            if(this.ppu.nmi) { this.cpu.nmi(); this.ppu.nmi=false; }
+            this.apu.step(c);
+          }
+          this.fc++;
+        }
+        if(now-this.lastFps>=1000){
+          document.getElementById('fps').textContent=this.fc; 
+          document.getElementById('mhz').textContent="1.789"; 
+          this.fc=0; this.lastFps=now;
+        }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }
+    pause(){this.running=false; document.getElementById('btnRun').disabled=false;}
+    reset(){if(this.cpu){this.cpu.reset();this.ppu.reset();}}
+  }
+
+  const canvas = document.getElementById('screen');
+  const nes = new NES(canvas);
+  const rom = document.getElementById('rom');
+  rom.addEventListener('change',async e=>{
+    if(!e.target.files[0])return;
+    const buf=new Uint8Array(await e.target.files[0].arrayBuffer());
+    try{ nes.loadROM(buf); document.getElementById('romName').textContent=e.target.files[0].name; }
+    catch(err){ alert('Load error: '+err.message); }
+  });
+  document.getElementById('btnRun').onclick=()=>{nes.run(); document.getElementById('btnRun').disabled=true; document.getElementById('btnPause').disabled=false;};
+  document.getElementById('btnPause').onclick=()=>{nes.pause(); document.getElementById('btnPause').disabled=true;};
+  document.getElementById('btnReset').onclick=()=>nes.reset();
+
+})();
+</script>
+</body>
+</html>
