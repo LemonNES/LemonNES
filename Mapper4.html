@@ -563,201 +563,116 @@
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
 
-class Mapper4 extends Mapper {
-    constructor(cart) {
-        super(cart);
-        this.cpu = null;
-        this.ppu = null;
-
-        // MMC3 registers
-        this.bankSelect = 0; // $8000 (even)
-        this.bankData = new Uint8Array(8); // $8001 (odd)
-        this.prgMode = 0; // 0: $C000 fixed to -2 bank, 1: $8000 fixed to -2 bank
-        this.chrMode = 0; // 0: 2KB banks at $0000/$0800, 1: 1KB banks at $0000..$1000
-        
-        // IRQ registers
-        this.irqLatch = 0; // $C000 (even)
-        this.irqCounter = 0; // $C001 (odd) triggers this to 0
-        this.irqEnable = false; // $E001 (odd)
-        this.prevA12 = 0; // Used for scanline counting
-        
-        // Calculated Banks for easy access
-        this.prgBanks = new Uint8Array(4); // 4 banks of 8KB (0x8000, 0xA000, 0xC000, 0xE000)
-        this.chrBanks = new Uint8Array(8); // 8 banks of 1KB (0x0000 to 0x1C00)
-
-        // Bank indices (based on size of ROM, 0x2000 = 8KB)
-        this.prgBanksTotal = this.cart.prg.length / 0x2000;
-        this.lastBank = this.prgBanksTotal - 1;
-
-        // Initialize bank data
-        this.updatePrgMapping();
-        this.updateChrMapping();
+class NES{
+    constructor(canvas){
+      this.ppu=new PPU(); this.ppu.attachCanvas(canvas);
+      this.input=new Controllers();
+      this.cart=null; this.bus=null; this.cpu=null; this.apu=new APU();
+      this.running=false; this.last=performance.now(); this.frames=0; this.fps=0; this.mhz='—';
+      // Responsive canvas for mobile
+      this.makeResponsiveCanvas();
+      // --- Frame timing
+      this._lastFrameTime = 0;
+      this._frameInterval = 1000/60;
+      // 60Hz default
+      this._pendingFrames = 0;
+      this._lastFpsUpdate = performance.now();
+      this._frameCount = 0;
     }
-
-    // --- Core Methods ---
-
-    // The scanline counter logic is correct, but needs to be hooked up to PPU access
-    ppuCycle() {
-        if (!this.ppu) return;
-        // The PPU's 'v' register is the current VRAM address
-        const a12 = (this.ppu.v & 0x1000) >> 12;
-
-        // The counter decrements on the *rising edge* of PPU A12 (0 -> 1)
-        if (this.prevA12 === 0 && a12 === 1) {
-            this.scanlineTick();
-        }
-        this.prevA12 = a12;
-    }
-
-    scanlineTick() {
-        if (this.irqCounter === 0) {
-            this.irqCounter = this.irqLatch;
+    makeResponsiveCanvas() {
+      const c = this.ppu.canvas;
+      const resize = () => {
+        if(window.innerWidth < 900) {
+          // Fit width to viewport, keep aspect
+          c.style.width = "98vw";
+          c.style.height = Math.round(240*98/256) + "vw";
         } else {
-            this.irqCounter--;
+          c.style.width = "768px";
+          c.style.height = "720px";
         }
-
-        if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
-            this.cpu.triggerIRQ();
+      };
+      window.addEventListener('resize', resize);
+      resize();
+    }
+    loadROM(bytes){
+      this.cart=new Cartridge(bytes);
+      this.ppu.connectCart(this.cart);
+      
+      // Bus needs PPU, Cart, Input, APU (CPU is null initially)
+      this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu);
+      this.cpu=new CPU6502(this.bus);
+      this.bus.cpu=this.cpu;
+      
+      // --- FIX: Dependency Injection for Mapper 4 ---
+      // Mapper 4 needs references to CPU (for IRQ) and PPU (for Mirroring)
+      // which weren't available during instantiation.
+      if (this.ppu.mapper instanceof Mapper4) {
+          this.ppu.mapper.cpu = this.cpu;
+          this.ppu.mapper.ppu = this.ppu;
+      }
+      // ----------------------------------------------
+      
+      this.cpu.reset();
+      document.getElementById('mapper').textContent=this.cart.mapper;
+      document.getElementById('mirror').textContent=this.cart.mirror;
+    }
+    reset(){ if(!this.cpu) return;
+      this.cpu.reset(); this.ppu.reset(); }
+    step(){ // 1 CPU cycle ~ 3 PPU cycles (NTSC).
+      // We'll drive PPU 3x per CPU step.
+      const cyc = this.cpu.step(); for(let i=0;i<cyc*3;i++){ this.ppu.step(); if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false;
+      } }
+      this.apu.step(cyc);
+    }
+    run(){
+      if(this.running) return;
+      this.running=true;
+      this._lastFrameTime = performance.now();
+      this._pendingFrames = 0;
+      const animate = (now) => {
+        if (!this.running) return;
+        let framesToRun = 0;
+        // Frameskip logic
+        let dt = now - this._lastFrameTime;
+        if (dt > 1000) dt = 0;
+        this._lastFrameTime = now;
+        this._pendingFrames += dt / this._frameInterval;
+        framesToRun = Math.floor(this._pendingFrames);
+        this._pendingFrames -= framesToRun;
+        if (framesToRun > 5) framesToRun = 5;
+        // Cap catch-up
+        // Run frames
+        for (let f = 0; f < framesToRun; ++f) {
+          // Run one NES frame: 29780 CPU cycles (for NTSC, approx 60Hz)
+          let cpuCycles = 0;
+          while (cpuCycles < 29780) {
+            cpuCycles += this.cpu.step();
+            for (let i = 0; i < 3; i++) {
+              this.ppu.step();
+              if (this.ppu.nmi) {
+                this.cpu.nmi();
+                this.ppu.nmi = false;
+              }
+            }
+            this.apu.step(1);
+          }
+          this._frameCount++;
         }
-    }
-
-    // --- Mapping Helpers (CRITICAL FIXES) ---
-
-    updatePrgMapping() {
-        // $8000: PRG Mode 0 -> R6, PRG Mode 1 -> Last Bank
-        // $C000: PRG Mode 0 -> Last Bank, PRG Mode 1 -> R6
-        
-        if (this.prgMode === 0) {
-            this.prgBanks[0] = this.bankData[6];    // $8000
-            this.prgBanks[2] = this.lastBank;       // $C000 (fixed to last bank)
-        } else { // prgMode === 1
-            this.prgBanks[0] = this.lastBank;       // $8000 (fixed to last bank)
-            this.prgBanks[2] = this.bankData[6];    // $C000
+        // Update FPS counter every second
+        const nowTime = performance.now();
+        if (nowTime - this._lastFpsUpdate >= 1000) {
+          document.getElementById('fps').textContent = this._frameCount;
+          document.getElementById('mhz').textContent = "~1.79 (approx)";
+          this._frameCount = 0;
+          this._lastFpsUpdate = nowTime;
         }
-
-        // $A000 and $E000 are always mapped to R7 and the second-to-last bank
-        this.prgBanks[1] = this.bankData[7];        // $A000 (always R7)
-        this.prgBanks[3] = this.lastBank;           // $E000 (fixed to last bank)
+        requestAnimationFrame(animate);
+      };
+      requestAnimationFrame(animate);
     }
-
-    updateChrMapping() {
-        // R0, R1 are 2KB banks (0x800 size, 0x400 index/shift)
-        // R2..R5 are 1KB banks (0x400 size, 0x400 index/shift)
-        const R = this.bankData;
-
-        // Banks R0 and R1 are 2KB in size, but the registers only hold a 6-bit value (index 0-63)
-        // They must be aligned to a 2KB boundary, so we force the last bit to 0.
-        this.chrBanks[0] = R[0] & 0xFE; 
-        this.chrBanks[1] = R[0] | 0x01;
-        this.chrBanks[2] = R[1] & 0xFE; 
-        this.chrBanks[3] = R[1] | 0x01;
-        
-        // Banks R2..R5 are 1KB in size
-        this.chrBanks[4] = R[2];
-        this.chrBanks[5] = R[3];
-        this.chrBanks[6] = R[4];
-        this.chrBanks[7] = R[5];
-    }
-    
-    // --- CPU READ/WRITE ---
-
-    prgRead(addr) {
-        // Map 0x8000 to 0xFFFF (32KB space, 4 banks of 8KB/0x2000)
-        let index = (addr - 0x8000) / 0x2000;
-        let bank = this.prgBanks[index];
-        let offset = addr & 0x1FFF;
-
-        return this.cart.prg[(bank * 0x2000) + offset];
-    }
-
-    prgWrite(addr, value) {
-        // Registers live in $8000-$FFFF (PRG-ROM addresses)
-        this.writeRegister(addr, value);
-    }
-
-    // --- PPU READ (CRITICAL FIX) ---
-
-    chrRead(addr) {
-        // Map 0x0000 to 0x1FFF (8KB space, 8 banks of 1KB/0x400)
-        let index = addr / 0x400; // Determines which 1KB bank to use
-        let offset = addr & 0x3FF; // Offset within the 1KB bank
-        
-        let bank;
-        
-        // CRITICAL: Handle CHR Mode (0 or 1)
-        if (this.chrMode === 0) {
-            bank = this.chrBanks[index];
-        } else { // chrMode === 1: Swap 0-3 with 4-7
-            // 0x0000-0x0FFF (4KB) maps to R2-R5 (chrBanks[4]-chrBanks[7])
-            // 0x1000-0x1FFF (4KB) maps to R0-R1 (chrBanks[0]-chrBanks[3])
-            if (addr < 0x1000) {
-                // index 0..3 maps to chrBanks 4..7
-                bank = this.chrBanks[index + 4];
-            } else {
-                // index 4..7 maps to chrBanks 0..3
-                bank = this.chrBanks[index - 4];
-            }
-        }
-        
-        // Use the bank index to find the byte in the CHR array
-        return this.cart.chr[(bank * 0x400) + offset];
-    }
-
-    // --- Register Write Logic ---
-
-    writeRegister(addr, value) {
-        if (addr >= 0x8000 && addr <= 0x9FFF) {
-            // $8000 (even): Bank Select
-            if ((addr & 1) === 0) {
-                this.bankSelect = value;
-                const newPrgMode = (value >> 6) & 1;
-                const newChrMode = (value >> 7) & 1;
-                
-                // Only re-map if mode changes
-                if (this.prgMode !== newPrgMode) {
-                    this.prgMode = newPrgMode;
-                    this.updatePrgMapping();
-                }
-                if (this.chrMode !== newChrMode) {
-                    this.chrMode = newChrMode;
-                    this.updateChrMapping();
-                }
-            } 
-            // $8001 (odd): Bank Data
-            else {
-                const reg = this.bankSelect & 0x07;
-                this.bankData[reg] = value;
-                
-                // CRITICAL: After writing a bank data register, immediately update mappings
-                if (reg >= 6) { // PRG bank register R6 or R7
-                    this.updatePrgMapping();
-                } else { // CHR bank register R0-R5
-                    this.updateChrMapping();
-                }
-            }
-        } else if (addr >= 0xA000 && addr <= 0xBFFF) {
-            // $A000 (even): Mirroring
-            if ((addr & 1) === 0) {
-                if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
-            }
-            // $A001 (odd): PRG RAM protect (ignored)
-        } else if (addr >= 0xC000 && addr <= 0xDFFF) {
-            // $C000 (even): IRQ Latch
-            if ((addr & 1) === 0) this.irqLatch = value;
-            // $C001 (odd): IRQ Reload/Counter Reset
-            else this.irqCounter = 0;
-        } else if (addr >= 0xE000 && addr <= 0xFFFF) {
-            // $E000 (even): IRQ Disable
-            if ((addr & 1) === 0) {
-                this.irqEnable = false;
-            }
-            // $E001 (odd): IRQ Enable
-            else {
-                this.irqEnable = true;
-            }
-        }
-    }
+    pause(){ this.running=false; }
 }
+
   // ===== Cartridge (iNES) ===== 
   class Cartridge{
     constructor(bytes){ this.bytes=bytes; this.parseINES(); }
