@@ -562,19 +562,18 @@
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
- class Mapper4 {
-    constructor(cpu, ppu, prgROM, chrROM) {
-        this.cpu = cpu;
-        this.ppu = ppu;
-        this.prgROM = prgROM;
-        this.chrROM = chrROM;
+
+class Mapper4 extends Mapper {
+    constructor(cart) {
+        super(cart);
+        this.cpu = null;
+        this.ppu = null;
 
         // MMC3 registers
         this.bankSelect = 0;
         this.bankData = new Uint8Array(8);
         this.prgMode = 0;
         this.chrMode = 0;
-
         // IRQ registers
         this.irqLatch = 0;
         this.irqCounter = 0;
@@ -582,12 +581,14 @@
         this.prevA12 = 0;
 
         // PRG bank caching
-        this.lastBank = (prgROM.length / 0x2000) - 1;
+        this.lastBank = (this.cart.prg.length / 0x2000) - 1;
     }
 
-    // Call this every PPU cycle
+    // Call this every PPU cycle (Note: Requires PPU loop hook-up to function)
     ppuCycle() {
-        const a12 = (this.ppu.vramAddress & 0x1000) >> 12;
+        if (!this.ppu) return;
+        // Fixed: vramAddress is 'v' in this PPU implementation
+        const a12 = (this.ppu.v & 0x1000) >> 12;
         if (this.prevA12 === 0 && a12 === 1) {
             this.scanlineTick();
         }
@@ -601,7 +602,7 @@
             this.irqCounter--;
         }
 
-        if (this.irqCounter === 0 && this.irqEnable) {
+        if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
             this.cpu.triggerIRQ();
         }
     }
@@ -609,19 +610,22 @@
     prgRead(addr) {
         let bank = 0;
         if (addr >= 0x8000 && addr <= 0x9FFF) {
-            bank = this.prgMode === 0 ? this.bankData[6] : this.lastBank;
+            bank = this.prgMode === 0 ?
+                this.bankData[6] : this.lastBank;
         } else if (addr >= 0xA000 && addr <= 0xBFFF) {
             bank = this.bankData[7];
         } else if (addr >= 0xC000 && addr <= 0xDFFF) {
-            bank = this.prgMode === 0 ? this.lastBank : this.bankData[6];
+            bank = this.prgMode === 0 ?
+                this.lastBank : this.bankData[6];
         } else if (addr >= 0xE000 && addr <= 0xFFFF) {
             bank = this.lastBank;
         }
-        return this.prgROM[(bank * 0x2000) + (addr & 0x1FFF)];
+        // Use this.cart.prg instead of this.prgROM
+        return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
     }
 
     prgWrite(addr, value) {
-        // Usually writes go to bank registers, handle if needed
+        this.writeRegister(addr, value);
     }
 
     chrRead(addr) {
@@ -641,13 +645,15 @@
             else if (addr < 0x1000) bank = this.bankData[5];
             else if (addr < 0x1400) bank = this.bankData[0];
             else if (addr < 0x1800) bank = this.bankData[1];
-            else bank = this.bankData[5]; // fallback
+            else bank = this.bankData[5];
         }
-        return this.chrROM[(bank * 0x400) + (addr & 0x3FF)];
+        // Use this.cart.chr instead of this.chrROM
+        return this.cart.chr[(bank * 0x400) + (addr & 0x3FF)];
     }
 
     chrWrite(addr, value) {
-        // Usually CHR ROM is read-only, handle CHR RAM if needed
+        // Handle CHR RAM if needed (not common on MMC3 but possible)
+        if (this.cart.chrRAM) this.cart.chr[addr] = value;
     }
 
     // Bank register writes
@@ -664,7 +670,8 @@
         } else if (addr >= 0xA000 && addr <= 0xBFFF) {
             if ((addr & 1) === 0) {
                 // Mirroring control (0=vertical, 1=horizontal)
-                this.ppu.setMirroring(value & 1);
+                // Direct set to PPU mirror property
+                if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
             }
             // else: PRG RAM protect (ignored for now)
         } else if (addr >= 0xC000 && addr <= 0xDFFF) {
@@ -1243,16 +1250,19 @@
   
 
   // ===== NES Machine =====
-  class NES{
+
+class NES{
     constructor(canvas){
-      this.ppu=new PPU(); this.ppu.attachCanvas(canvas); this.input=new Controllers();
+      this.ppu=new PPU(); this.ppu.attachCanvas(canvas);
+      this.input=new Controllers();
       this.cart=null; this.bus=null; this.cpu=null; this.apu=new APU();
       this.running=false; this.last=performance.now(); this.frames=0; this.fps=0; this.mhz='—';
       // Responsive canvas for mobile
       this.makeResponsiveCanvas();
       // --- Frame timing
       this._lastFrameTime = 0;
-      this._frameInterval = 1000/60; // 60Hz default
+      this._frameInterval = 1000/60;
+      // 60Hz default
       this._pendingFrames = 0;
       this._lastFpsUpdate = performance.now();
       this._frameCount = 0;
@@ -1272,10 +1282,34 @@
       window.addEventListener('resize', resize);
       resize();
     }
-    loadROM(bytes){ this.cart=new Cartridge(bytes); this.ppu.connectCart(this.cart); this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu); this.cpu=new CPU6502(this.bus); this.bus.cpu=this.cpu; this.cpu.reset(); document.getElementById('mapper').textContent=this.cart.mapper; document.getElementById('mirror').textContent=this.cart.mirror; }
-    reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
-    step(){ // 1 CPU cycle ~ 3 PPU cycles (NTSC). We'll drive PPU 3x per CPU step.
-      const cyc = this.cpu.step(); for(let i=0;i<cyc*3;i++){ this.ppu.step(); if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false; } }
+    loadROM(bytes){
+      this.cart=new Cartridge(bytes);
+      this.ppu.connectCart(this.cart);
+      
+      // Bus needs PPU, Cart, Input, APU (CPU is null initially)
+      this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu);
+      this.cpu=new CPU6502(this.bus);
+      this.bus.cpu=this.cpu;
+      
+      // --- FIX: Dependency Injection for Mapper 4 ---
+      // Mapper 4 needs references to CPU (for IRQ) and PPU (for Mirroring)
+      // which weren't available during instantiation.
+      if (this.ppu.mapper instanceof Mapper4) {
+          this.ppu.mapper.cpu = this.cpu;
+          this.ppu.mapper.ppu = this.ppu;
+      }
+      // ----------------------------------------------
+      
+      this.cpu.reset();
+      document.getElementById('mapper').textContent=this.cart.mapper;
+      document.getElementById('mirror').textContent=this.cart.mirror;
+    }
+    reset(){ if(!this.cpu) return;
+      this.cpu.reset(); this.ppu.reset(); }
+    step(){ // 1 CPU cycle ~ 3 PPU cycles (NTSC).
+      // We'll drive PPU 3x per CPU step.
+      const cyc = this.cpu.step(); for(let i=0;i<cyc*3;i++){ this.ppu.step(); if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false;
+      } }
       this.apu.step(cyc);
     }
     run(){
@@ -1293,7 +1327,8 @@
         this._pendingFrames += dt / this._frameInterval;
         framesToRun = Math.floor(this._pendingFrames);
         this._pendingFrames -= framesToRun;
-        if (framesToRun > 5) framesToRun = 5; // Cap catch-up
+        if (framesToRun > 5) framesToRun = 5;
+        // Cap catch-up
         // Run frames
         for (let f = 0; f < framesToRun; ++f) {
           // Run one NES frame: 29780 CPU cycles (for NTSC, approx 60Hz)
@@ -1324,8 +1359,7 @@
       requestAnimationFrame(animate);
     }
     pause(){ this.running=false; }
-  }
-
+}
   // ===== UI glue =====
   const canvas = document.getElementById('screen');
   const nes = new NES(canvas);
