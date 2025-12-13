@@ -1028,73 +1028,78 @@
     img[idx + 3] = 255;
   }
   step() {
-    // Odd-frame cycle skip
-    if (
-      this.scanline === 261 &&
-      this.cycle === 339 &&
-      (this.mask & 0x18) &&
-      this.oddFrame
-    ) {
-      this.cycle++;
-      this.oddFrame = false;
-      return;
-    }
-    // Visible scanlines 0-239; pre-render 261; vblank 241-260
-    if (this.scanline === 261) {
-      if (this.cycle === 1) {
-        this.status &= ~(0x80 | 0x40 | 0x20);
-      }
-      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {
-        this.copyY();
-      }
-    }
-    if (this.scanline >= 0 && this.scanline < 240) {
-      if (this.cycle === 0) {
-      } else if (this.cycle === 1) {
-        this.evalSprites();
-      }
-      if (this.cycle >= 1 && this.cycle <= 256) {
-        if ((this.cycle - 1) % 8 === 0) {
-          this.bgLatch = this.bgFetch();
-        }
-        const x = this.cycle - 1;
-        const y = this.scanline;
-        this.renderPixel(x, y, this.bgLatch, null);
-        if ((this.cycle & 7) === 0) {
-          this.incCoarseX();
-        }
-      }
-      if (this.cycle === 257) {
-        this.copyX();
-      }
-      if (this.cycle === 256) {
-        this.incY();
-      }
-    }
-    if (this.scanline === 241 && this.cycle === 1) {
-      this.status |= 0x80;
-      if (this.ctrl & 0x80) {
-        this.nmiDelay = 2; // NMI delay for correct edge timing
-      }
-      this.ctx.putImageData(this.output, 0, 0);
-    }
-    if (this.nmiDelay > 0) {
-      this.nmiDelay--;
-      if (this.nmiDelay === 0) {
-        this.nmi = true;
-      }
-    }
-    this.cycle++;
-    if (this.cycle > 340) {
-      this.cycle = 0;
-      this.scanline++;
-      if (this.scanline > 261) {
-        this.scanline = 0;
-        this.frame++;
-        this.oddFrame = !this.oddFrame;
-      }
-    }
-  }
+    // === CRITICAL FIX: Notify the mapper on every PPU cycle ===
+    // This allows Mapper 4 (MMC3) to monitor the A12 line and trigger IRQs.
+    if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
+    // ==========================================================
+
+    // Odd-frame cycle skip
+    if (
+      this.scanline === 261 &&
+      this.cycle === 339 &&
+      (this.mask & 0x18) &&
+      this.oddFrame
+    ) {
+      this.cycle++;
+      this.oddFrame = false;
+      return;
+    }
+    // Visible scanlines 0-239; pre-render 261; vblank 241-260
+    if (this.scanline === 261) {
+      if (this.cycle === 1) {
+        this.status &= ~(0x80 | 0x40 | 0x20);
+      }
+      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {
+        this.copyY();
+      }
+    }
+    if (this.scanline >= 0 && this.scanline < 240) {
+      if (this.cycle === 0) {
+      } else if (this.cycle === 1) {
+        this.evalSprites();
+      }
+      if (this.cycle >= 1 && this.cycle <= 256) {
+        if ((this.cycle - 1) % 8 === 0) {
+          this.bgLatch = this.bgFetch();
+        }
+        const x = this.cycle - 1;
+        const y = this.scanline;
+        this.renderPixel(x, y, this.bgLatch, null);
+        if ((this.cycle & 7) === 0) {
+          this.incCoarseX();
+        }
+      }
+      if (this.cycle === 257) {
+        this.copyX();
+      }
+      if (this.cycle === 256) {
+        this.incY();
+      }
+    }
+    if (this.scanline === 241 && this.cycle === 1) {
+      this.status |= 0x80;
+      if (this.ctrl & 0x80) {
+        this.nmiDelay = 2; // NMI delay for correct edge timing
+      }
+      this.ctx.putImageData(this.output, 0, 0);
+    }
+    if (this.nmiDelay > 0) {
+      this.nmiDelay--;
+      if (this.nmiDelay === 0) {
+        this.nmi = true;
+      }
+    }
+    this.cycle++;
+    if (this.cycle > 340) {
+      this.cycle = 0;
+      this.scanline++;
+      if (this.scanline > 261) {
+        this.scanline = 0;
+        this.frame++;
+        this.oddFrame = !this.oddFrame;
+      }
+    }
+  }
 }
 
 
