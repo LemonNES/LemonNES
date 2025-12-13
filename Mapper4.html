@@ -627,28 +627,34 @@
         this.writeRegister(addr, value);
     }
 
-    chrRead(addr) {
-        let bank = 0;
-        if (this.chrMode === 0) {
-            if (addr < 0x0800) bank = this.bankData[0];
-            else if (addr < 0x1000) bank = this.bankData[1];
-            else if (addr < 0x1400) bank = this.bankData[2];
-            else if (addr < 0x1800) bank = this.bankData[3];
-            else if (addr < 0x1C00) bank = this.bankData[4];
-            else bank = this.bankData[5];
-        } else {
-            // swap layout for chrMode=1
-            if (addr < 0x0400) bank = this.bankData[2];
-            else if (addr < 0x0800) bank = this.bankData[3];
-            else if (addr < 0x0C00) bank = this.bankData[4];
-            else if (addr < 0x1000) bank = this.bankData[5];
-            else if (addr < 0x1400) bank = this.bankData[0];
-            else if (addr < 0x1800) bank = this.bankData[1];
-            else bank = this.bankData[5];
-        }
-        // Use this.cart.chr instead of this.chrROM
-        return this.cart.chr[(bank * 0x400) + (addr & 0x3FF)];
+// Inside class Mapper4, replace chrRead(addr)
+chrRead(addr) {
+    // 'index' is the PPU Address Index (0-7 for 8 x 1KB banks)
+    let index = addr / 0x400; 
+    let offset = addr & 0x3FF;
+    
+    let bankIndex;
+    
+    // 1. CHR Mode Inversion Check
+    if (this.chrMode === 0) {
+        bankIndex = index;
+    } else { // chrMode === 1: Swap 4KB halves
+        bankIndex = (index < 4) ? (index + 4) : (index - 4);
     }
+
+    // 2. Get the physical bank number requested by the game (0-63)
+    let bank = this.chrBanks[bankIndex];
+    
+    // 3. CRITICAL WRAPPING: Ensure the bank index is within the physical limits
+    // The total number of available 1KB banks in the ROM.
+    const total1KBBanks = this.cart.chr.length / 0x400;
+    
+    // Use modulo to wrap the requested bank index around the physical space.
+    bank = bank % total1KBBanks; 
+    
+    // 4. Final access to the CHR array
+    return this.cart.chr[(bank * 0x400) + offset];
+}    
 
     chrWrite(addr, value) {
         // Handle CHR RAM if needed (not common on MMC3 but possible)
@@ -855,15 +861,20 @@
   doDMA(buf) {
     for (let i = 0; i < 256; i++) this.oam[(this.oamaddr + i) & 0xff] = buf[i];
   }
-  ntIndex(addr) {
+ // Replace PPU.ntIndex(addr)
+ ntIndex(addr) {
     const a = (addr - 0x2000) & 0x0fff;
     const nt = (a >> 10) & 3;
     const off = a & 0x03ff;
-    if (this.mirror === "vertical") return ((nt & 1) * 0x400) + off;
-    if (this.mirror === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
-    if (this.mirror === "four") return a;
-    return off;
-  }
+
+    // Use the dynamic mirror setting from the PPU property.
+    const effectiveMirror = this.mirror; 
+
+    if (effectiveMirror === "vertical") return ((nt & 1) * 0x400) + off;
+    if (effectiveMirror === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
+    if (effectiveMirror === "four") return a;
+    return off; // Default single-screen
+}
   ppuRead(addr) {
     addr &= 0x3fff;
     if (addr < 0x2000) return this.mapper.chrRead(addr);
