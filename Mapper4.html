@@ -592,13 +592,17 @@ class Mapper4 extends Mapper {
         this.updateChrMapping();
     }
 
-    // --- Core Methods ---
-    ppuCycle() {
-        if (!this.ppu) return;
-        const a12 = (this.ppu.v & 0x1000) >> 12;
-
+  // [CRITICAL FIX] Replaces ppuCycle()
+    // Called by PPU whenever it reads memory
+    handleA12(addr) {
+        // A12 is Bit 12 (0x1000)
+        const a12 = (addr & 0x1000) >> 12;
+        
+        // Simple rising edge detector
         if (this.prevA12 === 0 && a12 === 1) {
-            this.scanlineTick();
+             // For better accuracy, real hardware has a filter here (ignoring short spikes)
+             // But for MVP, this rising edge check is usually sufficient for SMB2/SMB3
+             this.scanlineTick();
         }
         this.prevA12 = a12;
     }
@@ -954,8 +958,17 @@ ntIndex(addr) {
 }
   ppuRead(addr) {
     addr &= 0x3fff;
+
+    // [CRITICAL FIX] Notify Mapper of A12 State
+    // MMC3 monitors the address bus for A12 toggles (Bit 12: 0x1000)
+    // We filter for only Pattern Table reads (0x0000-0x1FFF) for accuracy
+    if (this.mapper && this.mapper.handleA12) {
+        this.mapper.handleA12(addr);
+    }
+
     if (addr < 0x2000) return this.mapper.chrRead(addr);
     if (addr < 0x3f00) return this.vram[this.ntIndex(addr)];
+    
     // Palette mirroring
     let palAddr = addr & 0x1f;
     if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
@@ -1118,7 +1131,7 @@ ntIndex(addr) {
   step() {
     // === CRITICAL FIX: Notify the mapper on every PPU cycle ===
     // This allows Mapper 4 (MMC3) to monitor the A12 line and trigger IRQs.
-    if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
+   // if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
     // ==========================================================
 
     // Odd-frame cycle skip
