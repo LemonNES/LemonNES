@@ -570,16 +570,16 @@ class Mapper4 extends Mapper {
         this.ppu = null;
 
         // MMC3 registers
-        this.bankSelect = 0;
-        this.bankData = new Uint8Array(8);
-        this.prgMode = 0;
-        this.chrMode = 0;
+        this.bankSelect = 0; // $8000 (even)
+        this.bankData = new Uint8Array(8); // $8001 (odd)
+        this.prgMode = 0; // 0: $C000 fixed to -2 bank, 1: $8000 fixed to -2 bank
+        this.chrMode = 0; // 0: 2KB banks at $0000/$0800, 1: 1KB banks at $0000..$1000
         
         // IRQ registers
-        this.irqLatch = 0;
-        this.irqCounter = 0;
-        this.irqEnable = false;
-        this.prevA12 = 0;
+        this.irqLatch = 0; // $C000 (even)
+        this.irqCounter = 0; // $C001 (odd) triggers this to 0
+        this.irqEnable = false; // $E001 (odd)
+        this.prevA12 = 0; // Used for scanline counting
         
         // Calculated Banks for easy access
         this.prgBanks = new Uint8Array(4); // 4 banks of 8KB (0x8000, 0xA000, 0xC000, 0xE000)
@@ -596,11 +596,13 @@ class Mapper4 extends Mapper {
 
     // --- Core Methods ---
 
-    // PPU/A12 IRQ logic is essential for split-screen and status bars (e.g., SMB3)
+    // The scanline counter logic is correct, but needs to be hooked up to PPU access
     ppuCycle() {
         if (!this.ppu) return;
+        // The PPU's 'v' register is the current VRAM address
         const a12 = (this.ppu.v & 0x1000) >> 12;
 
+        // The counter decrements on the *rising edge* of PPU A12 (0 -> 1)
         if (this.prevA12 === 0 && a12 === 1) {
             this.scanlineTick();
         }
@@ -619,32 +621,38 @@ class Mapper4 extends Mapper {
         }
     }
 
-    // --- Mapping Helpers ---
+    // --- Mapping Helpers (CRITICAL FIXES) ---
 
     updatePrgMapping() {
-        // Mode 0: R6, R7, -2, -1
-        // Mode 1: -2, R7, R6, -1
-        const bank_8000 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1;
-        const bank_C000 = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
+        // $8000: PRG Mode 0 -> R6, PRG Mode 1 -> Last Bank
+        // $C000: PRG Mode 0 -> Last Bank, PRG Mode 1 -> R6
         
-        // R6 maps 8KB blocks
-        this.prgBanks[0] = bank_8000;      // $8000
-        this.prgBanks[1] = this.bankData[7];   // $A000 (always R7)
-        this.prgBanks[2] = bank_C000;      // $C000
-        this.prgBanks[3] = this.lastBank;  // $E000 (fixed to last bank)
+        if (this.prgMode === 0) {
+            this.prgBanks[0] = this.bankData[6];    // $8000
+            this.prgBanks[2] = this.lastBank;       // $C000 (fixed to last bank)
+        } else { // prgMode === 1
+            this.prgBanks[0] = this.lastBank;       // $8000 (fixed to last bank)
+            this.prgBanks[2] = this.bankData[6];    // $C000
+        }
+
+        // $A000 and $E000 are always mapped to R7 and the second-to-last bank
+        this.prgBanks[1] = this.bankData[7];        // $A000 (always R7)
+        this.prgBanks[3] = this.lastBank;           // $E000 (fixed to last bank)
     }
 
     updateChrMapping() {
+        // R0, R1 are 2KB banks (0x800 size, 0x400 index/shift)
+        // R2..R5 are 1KB banks (0x400 size, 0x400 index/shift)
         const R = this.bankData;
-        
-        // R0 and R1 are 2KB banks, mapped to two 1KB slots each
-        // R[0] & 0xFE sets the 2KB bank base
+
+        // Banks R0 and R1 are 2KB in size, but the registers only hold a 6-bit value (index 0-63)
+        // They must be aligned to a 2KB boundary, so we force the last bit to 0.
         this.chrBanks[0] = R[0] & 0xFE; 
-        this.chrBanks[1] = R[0] | 0x01; // bank + 1
+        this.chrBanks[1] = R[0] | 0x01;
         this.chrBanks[2] = R[1] & 0xFE; 
-        this.chrBanks[3] = R[1] | 0x01; // bank + 1
+        this.chrBanks[3] = R[1] | 0x01;
         
-        // R2..R5 are 1KB banks, mapped to one 1KB slot each
+        // Banks R2..R5 are 1KB in size
         this.chrBanks[4] = R[2];
         this.chrBanks[5] = R[3];
         this.chrBanks[6] = R[4];
@@ -654,6 +662,7 @@ class Mapper4 extends Mapper {
     // --- CPU READ/WRITE ---
 
     prgRead(addr) {
+        // Map 0x8000 to 0xFFFF (32KB space, 4 banks of 8KB/0x2000)
         let index = (addr - 0x8000) / 0x2000;
         let bank = this.prgBanks[index];
         let offset = addr & 0x1FFF;
@@ -662,42 +671,49 @@ class Mapper4 extends Mapper {
     }
 
     prgWrite(addr, value) {
+        // Registers live in $8000-$FFFF (PRG-ROM addresses)
         this.writeRegister(addr, value);
     }
 
-    // --- PPU READ (CRITICAL FIX APPLIED HERE) ---
+    // --- PPU READ (CRITICAL FIX) ---
 
     chrRead(addr) {
-        // 'index' is the PPU Address Index (0-7 for 8 x 1KB banks)
-        let index = addr / 0x400; 
-        let offset = addr & 0x3FF;
+        // Map 0x0000 to 0x1FFF (8KB space, 8 banks of 1KB/0x400)
+        let index = addr / 0x400; // Determines which 1KB bank to use
+        let offset = addr & 0x3FF; // Offset within the 1KB bank
         
-        let bankIndex;
+        let bank;
         
-        // CRITICAL FIX: The transformation must swap the top/bottom 4KB halves.
-        // Index 0-3 (0x0000-0x0FFF) is swapped with Index 4-7 (0x1000-0x1FFF)
+        // CRITICAL: Handle CHR Mode (0 or 1)
         if (this.chrMode === 0) {
-            bankIndex = index;
-        } else { // chrMode === 1: Swap bank indices
-            bankIndex = (index < 4) ? (index + 4) : (index - 4);
+            bank = this.chrBanks[index];
+        } else { // chrMode === 1: Swap 0-3 with 4-7
+            // 0x0000-0x0FFF (4KB) maps to R2-R5 (chrBanks[4]-chrBanks[7])
+            // 0x1000-0x1FFF (4KB) maps to R0-R1 (chrBanks[0]-chrBanks[3])
+            if (addr < 0x1000) {
+                // index 0..3 maps to chrBanks 4..7
+                bank = this.chrBanks[index + 4];
+            } else {
+                // index 4..7 maps to chrBanks 0..3
+                bank = this.chrBanks[index - 4];
+            }
         }
-
-        // Get the physical bank number from the chrBanks array
-        let bank = this.chrBanks[bankIndex];
         
-        // Final access to the CHR array
+        // Use the bank index to find the byte in the CHR array
         return this.cart.chr[(bank * 0x400) + offset];
     }
 
-    // --- Register Write Logic (Unchanged from last step, but included for completeness) ---
+    // --- Register Write Logic ---
 
     writeRegister(addr, value) {
         if (addr >= 0x8000 && addr <= 0x9FFF) {
-            if ((addr & 1) === 0) { // $8000 (even): Bank Select
+            // $8000 (even): Bank Select
+            if ((addr & 1) === 0) {
                 this.bankSelect = value;
                 const newPrgMode = (value >> 6) & 1;
                 const newChrMode = (value >> 7) & 1;
                 
+                // Only re-map if mode changes
                 if (this.prgMode !== newPrgMode) {
                     this.prgMode = newPrgMode;
                     this.updatePrgMapping();
@@ -706,10 +722,13 @@ class Mapper4 extends Mapper {
                     this.chrMode = newChrMode;
                     this.updateChrMapping();
                 }
-            } else { // $8001 (odd): Bank Data
+            } 
+            // $8001 (odd): Bank Data
+            else {
                 const reg = this.bankSelect & 0x07;
                 this.bankData[reg] = value;
                 
+                // CRITICAL: After writing a bank data register, immediately update mappings
                 if (reg >= 6) { // PRG bank register R6 or R7
                     this.updatePrgMapping();
                 } else { // CHR bank register R0-R5
@@ -717,22 +736,28 @@ class Mapper4 extends Mapper {
                 }
             }
         } else if (addr >= 0xA000 && addr <= 0xBFFF) {
-            if ((addr & 1) === 0) { // $A000 (even): Mirroring
+            // $A000 (even): Mirroring
+            if ((addr & 1) === 0) {
                 if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
             }
+            // $A001 (odd): PRG RAM protect (ignored)
         } else if (addr >= 0xC000 && addr <= 0xDFFF) {
-            if ((addr & 1) === 0) this.irqLatch = value; // $C000 (even): IRQ Latch
-            else this.irqCounter = 0; // $C001 (odd): IRQ Reset
+            // $C000 (even): IRQ Latch
+            if ((addr & 1) === 0) this.irqLatch = value;
+            // $C001 (odd): IRQ Reload/Counter Reset
+            else this.irqCounter = 0;
         } else if (addr >= 0xE000 && addr <= 0xFFFF) {
-            if ((addr & 1) === 0) { // $E000 (even): IRQ Disable
+            // $E000 (even): IRQ Disable
+            if ((addr & 1) === 0) {
                 this.irqEnable = false;
-            } else { // $E001 (odd): IRQ Enable
+            }
+            // $E001 (odd): IRQ Enable
+            else {
                 this.irqEnable = true;
             }
         }
     }
 }
-
   // ===== Cartridge (iNES) ===== 
   class Cartridge{
     constructor(bytes){ this.bytes=bytes; this.parseINES(); }
