@@ -562,7 +562,8 @@
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
- class Mapper4 extends Mapper {
+
+class Mapper4 extends Mapper {
     constructor(cart) {
         super(cart);
         this.cpu = null;
@@ -573,27 +574,36 @@
         this.bankData = new Uint8Array(8);
         this.prgMode = 0;
         this.chrMode = 0;
+        
         // IRQ registers
         this.irqLatch = 0;
         this.irqCounter = 0;
         this.irqEnable = false;
         this.prevA12 = 0;
+        
+        // Calculated Banks
+        this.prgBanks = new Uint8Array(4);
+        this.chrBanks = new Uint8Array(8);
 
-        // PRG bank caching
-        this.lastBank = (this.cart.prg.length / 0x2000) - 1;
+        this.prgBanksTotal = this.cart.prg.length / 0x2000;
+        this.lastBank = this.prgBanksTotal - 1;
+
+        this.updatePrgMapping();
+        this.updateChrMapping();
     }
 
-    // Call this every PPU cycle (Note: Requires PPU loop hook-up to function)
+    // --- Core Methods ---
     ppuCycle() {
         if (!this.ppu) return;
-        // Fixed: vramAddress is 'v' in this PPU implementation
         const a12 = (this.ppu.v & 0x1000) >> 12;
+
         if (this.prevA12 === 0 && a12 === 1) {
             this.scanlineTick();
         }
         this.prevA12 = a12;
     }
 
+    // CRITICAL IRQ ASSERTION
     scanlineTick() {
         if (this.irqCounter === 0) {
             this.irqCounter = this.irqLatch;
@@ -602,85 +612,121 @@
         }
 
         if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
-            // This method must set this.cpu.irqAsserted = true;
-            this.cpu.triggerIRQ(); 
+            // Must directly set the line HIGH (assert the interrupt)
+            // Replace 'irqLine' if your CPU uses a different property name
+            this.cpu.irqLine = true; 
         }
-    }   
+    }
+
+    // --- Mapping Helpers (UNCHANGED) ---
+    updatePrgMapping() {
+        const bank_8000 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1;
+        const bank_C000 = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
+        
+        this.prgBanks[0] = bank_8000;
+        this.prgBanks[1] = this.bankData[7];
+        this.prgBanks[2] = bank_C000;
+        this.prgBanks[3] = this.lastBank;
+    }
+
+    updateChrMapping() {
+        const R = this.bankData;
+        this.chrBanks[0] = R[0] & 0xFE; 
+        this.chrBanks[1] = R[0] | 0x01;
+        this.chrBanks[2] = R[1] & 0xFE; 
+        this.chrBanks[3] = R[1] | 0x01;
+        this.chrBanks[4] = R[2];
+        this.chrBanks[5] = R[3];
+        this.chrBanks[6] = R[4];
+        this.chrBanks[7] = R[5];
+    }
+    
+    // --- CPU READ/WRITE (UNCHANGED) ---
+
     prgRead(addr) {
-        let bank = 0;
-        if (addr >= 0x8000 && addr <= 0x9FFF) {
-            bank = this.prgMode === 0 ?
-                this.bankData[6] : this.lastBank;
-        } else if (addr >= 0xA000 && addr <= 0xBFFF) {
-            bank = this.bankData[7];
-        } else if (addr >= 0xC000 && addr <= 0xDFFF) {
-            bank = this.prgMode === 0 ?
-                this.lastBank : this.bankData[6];
-        } else if (addr >= 0xE000 && addr <= 0xFFFF) {
-            bank = this.lastBank;
-        }
-        // Use this.cart.prg instead of this.prgROM
-        return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
+        let index = (addr - 0x8000) / 0x2000;
+        let bank = this.prgBanks[index];
+        let offset = addr & 0x1FFF;
+        return this.cart.prg[(bank * 0x2000) + offset];
     }
 
     prgWrite(addr, value) {
         this.writeRegister(addr, value);
     }
 
-chrRead(addr) {
-    // 'index' is the PPU Address Index (0-7 for 8 x 1KB banks)
-    let index = addr / 0x400; 
-    let offset = addr & 0x3FF;
-    
-    let bankIndex;
-    
-    // 1. CHR Mode Inversion Check
-    if (this.chrMode === 0) {
-        bankIndex = index;
-    } else { // chrMode === 1: Swap 4KB halves
-        bankIndex = (index < 4) ? (index + 4) : (index - 4);
-    }
+    // --- PPU READ (INCLUDES CHR WRAPPING FIX) ---
 
-    // 2. Get the physical bank number requested by the game (0-63)
-    let bank = this.chrBanks[bankIndex];
-    
-    // 3. CRITICAL WRAPPING: Ensure the bank index is within the physical limits
-    // The total number of available 1KB banks in the ROM.
-    const total1KBBanks = this.cart.chr.length / 0x400;
-    
-    // Use modulo to wrap the requested bank index around the physical space.
-    bank = bank % total1KBBanks; 
-    
-    // 4. Final access to the CHR array
-    return this.cart.chr[(bank * 0x400) + offset];
-}    
+    chrRead(addr) {
+        let index = addr / 0x400; 
+        let offset = addr & 0x3FF;
+        let bankIndex;
+        
+        if (this.chrMode === 0) {
+            bankIndex = index;
+        } else { 
+            bankIndex = (index < 4) ? (index + 4) : (index - 4);
+        }
+
+        let bank = this.chrBanks[bankIndex];
+        
+        const total1KBBanks = this.cart.chr.length / 0x400;
+        bank = bank % total1KBBanks; 
+        
+        return this.cart.chr[(bank * 0x400) + offset];
+    }
 
     chrWrite(addr, value) {
-        // Handle CHR RAM if needed (not common on MMC3 but possible)
-        if (this.cart.chrRAM) this.cart.chr[addr] = value;
+        // Required for games using CHR-RAM, e.g., Kirby's Adventure
+        if (this.cart.chrRAM || this.cart.chr.length === 0) this.cart.chr[addr & 0x1FFF] = value;
     }
 
-    // Bank register writes
+    // --- Register Write Logic (CRITICAL IRQ CLEAR FIX) ---
+
     writeRegister(addr, value) {
         if (addr >= 0x8000 && addr <= 0x9FFF) {
-            // ... (Bank Select/Data logic - UNCHANGED) ...
+            if ((addr & 1) === 0) {
+                this.bankSelect = value;
+                const newPrgMode = (value >> 6) & 1;
+                const newChrMode = (value >> 7) & 1;
+                
+                if (this.prgMode !== newPrgMode) {
+                    this.prgMode = newPrgMode;
+                    this.updatePrgMapping();
+                }
+                if (this.chrMode !== newChrMode) {
+                    this.chrMode = newChrMode;
+                    this.updateChrMapping();
+                }
+            } else {
+                const reg = this.bankSelect & 0x07;
+                this.bankData[reg] = value;
+                
+                if (reg >= 6) { 
+                    this.updatePrgMapping();
+                } else {
+                    this.updateChrMapping();
+                }
+            }
         } else if (addr >= 0xA000 && addr <= 0xBFFF) {
-            // ... (Mirroring logic - UNCHANGED) ...
+            if ((addr & 1) === 0) {
+                if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
+            }
         } else if (addr >= 0xC000 && addr <= 0xDFFF) {
-            // ... (IRQ Latch/Counter Reset logic - UNCHANGED) ...
+            if ((addr & 1) === 0) this.irqLatch = value;
+            else this.irqCounter = 0;
         } else if (addr >= 0xE000 && addr <= 0xFFFF) {
             if ((addr & 1) === 0) { // $E000 (even): IRQ Disable
                 this.irqEnable = false;
-            
+                
+                // CRITICAL FIX: Must immediately clear the IRQ line on the CPU.
                 if (this.cpu) {
-                    this.cpu.irqAsserted = false; 
+                    this.cpu.irqLine = false; 
                 }
-
             } else { // $E001 (odd): IRQ Enable
                 this.irqEnable = true;
             }
         }
-    }   
+    }
  }
   // ===== Cartridge (iNES) ===== 
   class Cartridge{
