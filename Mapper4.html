@@ -732,10 +732,12 @@ chrWrite(addr, value) {
                     this.updateChrMapping();
                 }
             }
-        } else if (addr >= 0xA000 && addr <= 0xBFFF) {
-            if ((addr & 1) === 0) {
-                if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
-            }
+} else if (addr >= 0xA000 && addr <= 0xBFFF) {
+    // $A000 (even): Mirroring
+    if ((addr & 1) === 0) {
+        // This is the line that matters:
+        if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
+    }
         } else if (addr >= 0xC000 && addr <= 0xDFFF) {
             if ((addr & 1) === 0) this.irqLatch = value;
             else this.irqCounter = 0;
