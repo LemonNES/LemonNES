@@ -640,10 +640,15 @@ class Mapper4 extends Mapper {
         this.chrBanks[6] = R[4];
         this.chrBanks[7] = R[5];
     }
-    
-    // --- CPU READ/WRITE (UNCHANGED) ---
+    // --- CPU READ/WRITE ---
 
     prgRead(addr) {
+        // Fix 1: Enable PRG-RAM (WRAM) access for $6000-$7FFF
+        if (addr >= 0x6000 && addr <= 0x7FFF) {
+             if (this.cart.sram) return this.cart.sram[addr - 0x6000];
+             return 0;
+        }
+
         let index = (addr - 0x8000) / 0x2000;
         let bank = this.prgBanks[index];
         let offset = addr & 0x1FFF;
@@ -651,8 +656,15 @@ class Mapper4 extends Mapper {
     }
 
     prgWrite(addr, value) {
+        // Fix 2: Enable PRG-RAM (WRAM) writing
+        if (addr >= 0x6000 && addr <= 0x7FFF) {
+            if (this.cart.sram) this.cart.sram[addr - 0x6000] = value;
+            return;
+        }
+
         this.writeRegister(addr, value);
     }
+    
 
     // --- PPU READ (INCLUDES CHR WRAPPING FIX) ---
 
