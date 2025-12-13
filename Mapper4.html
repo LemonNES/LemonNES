@@ -602,10 +602,10 @@
         }
 
         if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
-            this.cpu.triggerIRQ();
+            // This method must set this.cpu.irqAsserted = true;
+            this.cpu.triggerIRQ(); 
         }
-    }
-
+    }   
     prgRead(addr) {
         let bank = 0;
         if (addr >= 0x8000 && addr <= 0x9FFF) {
@@ -627,7 +627,6 @@
         this.writeRegister(addr, value);
     }
 
-// Inside class Mapper4, replace chrRead(addr)
 chrRead(addr) {
     // 'index' is the PPU Address Index (0-7 for 8 x 1KB banks)
     let index = addr / 0x400; 
