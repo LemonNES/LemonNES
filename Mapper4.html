@@ -675,10 +675,35 @@ class Mapper4 extends Mapper {
         return this.cart.chr[(bank * 0x400) + offset];
     }
 
-    chrWrite(addr, value) {
-        // Required for games using CHR-RAM, e.g., Kirby's Adventure
-        if (this.cart.chrRAM || this.cart.chr.length === 0) this.cart.chr[addr & 0x1FFF] = value;
+// Inside class Mapper4, replace chrWrite(addr, value)
+chrWrite(addr, value) {
+    // Note: addr is always 0x0000-0x1FFF
+
+    // Only allow writes if the cartridge has CHR-RAM
+    if (this.cart.chr.length > 0 && this.cart.chrROM) return;
+
+    // We must apply the same bank-switching logic for writes as for reads
+    let index = addr / 0x400; 
+    let offset = addr & 0x3FF;
+    let bankIndex;
+
+    // 1. CHR Mode Inversion Check
+    if (this.chrMode === 0) {
+        bankIndex = index;
+    } else { 
+        bankIndex = (index < 4) ? (index + 4) : (index - 4);
     }
+
+    // 2. Get the physical bank number
+    let bank = this.chrBanks[bankIndex];
+    
+    // 3. CRITICAL WRAPPING: Apply wrapping to the bank index
+    const total1KBBanks = this.cart.chr.length / 0x400;
+    bank = bank % total1KBBanks; 
+    
+    // 4. Write to the mapped CHR location
+    this.cart.chr[(bank * 0x400) + offset] = value;
+}
 
     // --- Register Write Logic (CRITICAL IRQ CLEAR FIX) ---
 
@@ -901,19 +926,15 @@ class Mapper4 extends Mapper {
   doDMA(buf) {
     for (let i = 0; i < 256; i++) this.oam[(this.oamaddr + i) & 0xff] = buf[i];
   }
- // Replace PPU.ntIndex(addr)
- ntIndex(addr) {
+ // Inside class PPU
+ntIndex(addr) {
     const a = (addr - 0x2000) & 0x0fff;
     const nt = (a >> 10) & 3;
     const off = a & 0x03ff;
-
-    // Use the dynamic mirror setting from the PPU property.
-    const effectiveMirror = this.mirror; 
-
-    if (effectiveMirror === "vertical") return ((nt & 1) * 0x400) + off;
-    if (effectiveMirror === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
-    if (effectiveMirror === "four") return a;
-    return off; // Default single-screen
+    if (this.mirror === "vertical") return ((nt & 1) * 0x400) + off;
+    if (this.mirror === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
+    if (this.mirror === "four") return a;
+    return off;
 }
   ppuRead(addr) {
     addr &= 0x3fff;
