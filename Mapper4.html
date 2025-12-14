@@ -563,6 +563,7 @@
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
 
+// [REPLACEMENT] Mapper 4 (MMC3) - Optimized for LemonNES PPU
 class Mapper4 extends Mapper {
     constructor(cart) {
         super(cart);
@@ -579,9 +580,8 @@ class Mapper4 extends Mapper {
         this.irqLatch = 0;
         this.irqCounter = 0;
         this.irqEnable = false;
-        this.prevA12 = 0;
         
-        // Calculated Banks
+        // Banks
         this.prgBanks = new Uint8Array(4);
         this.chrBanks = new Uint8Array(8);
 
@@ -592,22 +592,20 @@ class Mapper4 extends Mapper {
         this.updateChrMapping();
     }
 
-  // [CRITICAL FIX] Replaces ppuCycle()
-    // Called by PPU whenever it reads memory
-    handleA12(addr) {
-        // A12 is Bit 12 (0x1000)
-        const a12 = (addr & 0x1000) >> 12;
-        
-        // Simple rising edge detector
-        if (this.prevA12 === 0 && a12 === 1) {
-             // For better accuracy, real hardware has a filter here (ignoring short spikes)
-             // But for MVP, this rising edge check is usually sufficient for SMB2/SMB3
-             this.scanlineTick();
+    // --- IRQ Logic: Cycle Based (Stable for this PPU) ---
+    ppuCycle() {
+        if (!this.ppu) return;
+
+        // Only tick if rendering is enabled (Background or Sprites enabled)
+        if ((this.ppu.mask & 0x18) === 0) return;
+
+        // Tick exactly once per scanline, at cycle 260 (sprite fetch start on real hw)
+        // This bypasses the noisy memory read issues of the current PPU implementation.
+        if (this.ppu.cycle === 260 && this.ppu.scanline >= 0 && this.ppu.scanline <= 239) {
+            this.scanlineTick();
         }
-        this.prevA12 = a12;
     }
 
-    // CRITICAL IRQ ASSERTION
     scanlineTick() {
         if (this.irqCounter === 0) {
             this.irqCounter = this.irqLatch;
@@ -616,13 +614,11 @@ class Mapper4 extends Mapper {
         }
 
         if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
-            // Must directly set the line HIGH (assert the interrupt)
-            // Replace 'irqLine' if your CPU uses a different property name
-            this.cpu.irqLine = true; 
+            this.cpu.irqLine = true; // Assert IRQ
         }
     }
 
-    // --- Mapping Helpers (UNCHANGED) ---
+    // --- Memory Mapping ---
     updatePrgMapping() {
         const bank_8000 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1;
         const bank_C000 = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
@@ -644,86 +640,56 @@ class Mapper4 extends Mapper {
         this.chrBanks[6] = R[4];
         this.chrBanks[7] = R[5];
     }
-    // --- CPU READ/WRITE ---
-
+    
+    // --- Reads/Writes (With WRAM & CHR-RAM Support) ---
     prgRead(addr) {
-        // [FIX] Handle WRAM (Save RAM) at $6000-$7FFF
+        // [FIX] WRAM Support ($6000-$7FFF)
         if (addr >= 0x6000 && addr <= 0x7FFF) {
-            // Return RAM data if available, otherwise 0
             if (this.cart.sram) return this.cart.sram[addr - 0x6000];
             return 0;
         }
 
-        // Standard PRG ROM Bank Lookup
         let index = (addr - 0x8000) / 0x2000;
         let bank = this.prgBanks[index];
-        let offset = addr & 0x1FFF;
-        return this.cart.prg[(bank * 0x2000) + offset];
+        return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
     }
 
     prgWrite(addr, value) {
-        // [FIX] Handle WRAM (Save RAM) at $6000-$7FFF
+        // [FIX] WRAM Support
         if (addr >= 0x6000 && addr <= 0x7FFF) {
             if (this.cart.sram) this.cart.sram[addr - 0x6000] = value;
             return;
         }
-
-        // Standard Register Writes ($8000+)
         this.writeRegister(addr, value);
     }
-
-    // --- PPU READ (INCLUDES CHR WRAPPING FIX) ---
 
     chrRead(addr) {
         let index = addr / 0x400; 
         let offset = addr & 0x3FF;
-        let bankIndex;
-        
-        if (this.chrMode === 0) {
-            bankIndex = index;
-        } else { 
-            bankIndex = (index < 4) ? (index + 4) : (index - 4);
-        }
-
+        let bankIndex = (this.chrMode === 0) ? index : ((index < 4) ? (index + 4) : (index - 4));
         let bank = this.chrBanks[bankIndex];
         
-        const total1KBBanks = this.cart.chr.length / 0x400;
-        bank = bank % total1KBBanks; 
+        // [FIX] Bank Wrapping
+        const total = this.cart.chr.length / 0x400;
+        if (total > 0) bank %= total;
         
         return this.cart.chr[(bank * 0x400) + offset];
     }
 
-// Inside class Mapper4, replace chrWrite(addr, value)
-chrWrite(addr, value) {
-    // Note: addr is always 0x0000-0x1FFF
+    chrWrite(addr, value) {
+        // [FIX] CHR-RAM Support
+        if (this.cart.chrROM && this.cart.chr.length > 0) return; // ROM is read-only
 
-    // Only allow writes if the cartridge has CHR-RAM
-    if (this.cart.chr.length > 0 && this.cart.chrROM) return;
+        let index = addr / 0x400; 
+        let offset = addr & 0x3FF;
+        let bankIndex = (this.chrMode === 0) ? index : ((index < 4) ? (index + 4) : (index - 4));
+        let bank = this.chrBanks[bankIndex];
 
-    // We must apply the same bank-switching logic for writes as for reads
-    let index = addr / 0x400; 
-    let offset = addr & 0x3FF;
-    let bankIndex;
+        const total = this.cart.chr.length / 0x400;
+        if (total > 0) bank %= total;
 
-    // 1. CHR Mode Inversion Check
-    if (this.chrMode === 0) {
-        bankIndex = index;
-    } else { 
-        bankIndex = (index < 4) ? (index + 4) : (index - 4);
+        this.cart.chr[(bank * 0x400) + offset] = value;
     }
-
-    // 2. Get the physical bank number
-    let bank = this.chrBanks[bankIndex];
-    
-    // 3. CRITICAL WRAPPING: Apply wrapping to the bank index
-    const total1KBBanks = this.cart.chr.length / 0x400;
-    bank = bank % total1KBBanks; 
-    
-    // 4. Write to the mapped CHR location
-    this.cart.chr[(bank * 0x400) + offset] = value;
-}
-
-    // --- Register Write Logic (CRITICAL IRQ CLEAR FIX) ---
 
     writeRegister(addr, value) {
         if (addr >= 0x8000 && addr <= 0x9FFF) {
@@ -731,47 +697,31 @@ chrWrite(addr, value) {
                 this.bankSelect = value;
                 const newPrgMode = (value >> 6) & 1;
                 const newChrMode = (value >> 7) & 1;
-                
-                if (this.prgMode !== newPrgMode) {
-                    this.prgMode = newPrgMode;
-                    this.updatePrgMapping();
-                }
-                if (this.chrMode !== newChrMode) {
-                    this.chrMode = newChrMode;
-                    this.updateChrMapping();
-                }
+                if (this.prgMode !== newPrgMode) { this.prgMode = newPrgMode; this.updatePrgMapping(); }
+                if (this.chrMode !== newChrMode) { this.chrMode = newChrMode; this.updateChrMapping(); }
             } else {
                 const reg = this.bankSelect & 0x07;
                 this.bankData[reg] = value;
-                
-                if (reg >= 6) { 
-                    this.updatePrgMapping();
-                } else {
-                    this.updateChrMapping();
-                }
+                (reg >= 6) ? this.updatePrgMapping() : this.updateChrMapping();
             }
-} else if (addr >= 0xA000 && addr <= 0xBFFF) {
-    // $A000 (even): Mirroring
-    if ((addr & 1) === 0) {
-        // This is the line that matters:
-        if(this.ppu) this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
-    }
+        } else if (addr >= 0xA000 && addr <= 0xBFFF) {
+            if ((addr & 1) === 0 && this.ppu) {
+                this.ppu.mirror = (value & 1) ? 'horizontal' : 'vertical';
+            }
         } else if (addr >= 0xC000 && addr <= 0xDFFF) {
             if ((addr & 1) === 0) this.irqLatch = value;
             else this.irqCounter = 0;
         } else if (addr >= 0xE000 && addr <= 0xFFFF) {
-            if ((addr & 1) === 0) { // $E000 (even): IRQ Disable
+            if ((addr & 1) === 0) {
                 this.irqEnable = false;
-                
-                // CRITICAL FIX: Must immediately clear the IRQ line on the CPU.
-                if (this.cpu) {
-                    this.cpu.irqLine = false; 
-                }
-            } else { // $E001 (odd): IRQ Enable
+                if (this.cpu) this.cpu.irqLine = false; // [FIX] Clear IRQ
+            } else {
                 this.irqEnable = true;
             }
         }
     }
+}
+
  }
   // ===== Cartridge (iNES) ===== 
   class Cartridge{
@@ -1354,18 +1304,17 @@ ntIndex(addr) {
 
   // ===== NES Machine =====
 
-class NES{
+// [REPLACEMENT] NES Class - Ensures Mapper Hookup
+class NES {
     constructor(canvas){
-      this.ppu=new PPU(); this.ppu.attachCanvas(canvas);
+      this.ppu=new PPU(); 
+      this.ppu.attachCanvas(canvas);
       this.input=new Controllers();
       this.cart=null; this.bus=null; this.cpu=null; this.apu=new APU();
-      this.running=false; this.last=performance.now(); this.frames=0; this.fps=0; this.mhz='—';
-      // Responsive canvas for mobile
+      this.running=false; 
       this.makeResponsiveCanvas();
-      // --- Frame timing
       this._lastFrameTime = 0;
       this._frameInterval = 1000/60;
-      // 60Hz default
       this._pendingFrames = 0;
       this._lastFpsUpdate = performance.now();
       this._frameCount = 0;
@@ -1374,7 +1323,6 @@ class NES{
       const c = this.ppu.canvas;
       const resize = () => {
         if(window.innerWidth < 900) {
-          // Fit width to viewport, keep aspect
           c.style.width = "98vw";
           c.style.height = Math.round(240*98/256) + "vw";
         } else {
@@ -1388,33 +1336,31 @@ class NES{
     loadROM(bytes){
       this.cart=new Cartridge(bytes);
       this.ppu.connectCart(this.cart);
-      
-      // Bus needs PPU, Cart, Input, APU (CPU is null initially)
       this.bus=new Bus(null, this.ppu, this.cart, this.input, this.apu);
       this.cpu=new CPU6502(this.bus);
       this.bus.cpu=this.cpu;
       
-      // --- FIX: Dependency Injection for Mapper 4 ---
-      // Mapper 4 needs references to CPU (for IRQ) and PPU (for Mirroring)
-      // which weren't available during instantiation.
+      // [CRITICAL] Dependency Injection for Mapper
       if (this.ppu.mapper instanceof Mapper4) {
           this.ppu.mapper.cpu = this.cpu;
           this.ppu.mapper.ppu = this.ppu;
       }
-      // ----------------------------------------------
       
       this.cpu.reset();
       document.getElementById('mapper').textContent=this.cart.mapper;
       document.getElementById('mirror').textContent=this.cart.mirror;
     }
-    reset(){ if(!this.cpu) return;
-      this.cpu.reset(); this.ppu.reset(); }
-    step(){ // 1 CPU cycle ~ 3 PPU cycles (NTSC).
-      // We'll drive PPU 3x per CPU step.
-      const cyc = this.cpu.step(); for(let i=0;i<cyc*3;i++){ this.ppu.step(); if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false;
-      } }
+    reset(){ if(!this.cpu) return; this.cpu.reset(); this.ppu.reset(); }
+    
+    step(){ 
+      const cyc = this.cpu.step(); 
+      for(let i=0;i<cyc*3;i++){ 
+          this.ppu.step(); 
+          if(this.ppu.nmi){ this.cpu.nmi(); this.ppu.nmi=false; } 
+      }
       this.apu.step(cyc);
     }
+    
     run(){
       if(this.running) return;
       this.running=true;
@@ -1422,19 +1368,15 @@ class NES{
       this._pendingFrames = 0;
       const animate = (now) => {
         if (!this.running) return;
-        let framesToRun = 0;
-        // Frameskip logic
         let dt = now - this._lastFrameTime;
         if (dt > 1000) dt = 0;
         this._lastFrameTime = now;
         this._pendingFrames += dt / this._frameInterval;
-        framesToRun = Math.floor(this._pendingFrames);
+        let framesToRun = Math.floor(this._pendingFrames);
         this._pendingFrames -= framesToRun;
         if (framesToRun > 5) framesToRun = 5;
-        // Cap catch-up
-        // Run frames
+
         for (let f = 0; f < framesToRun; ++f) {
-          // Run one NES frame: 29780 CPU cycles (for NTSC, approx 60Hz)
           let cpuCycles = 0;
           while (cpuCycles < 29780) {
             cpuCycles += this.cpu.step();
@@ -1449,13 +1391,12 @@ class NES{
           }
           this._frameCount++;
         }
-        // Update FPS counter every second
-        const nowTime = performance.now();
-        if (nowTime - this._lastFpsUpdate >= 1000) {
+        
+        if (performance.now() - this._lastFpsUpdate >= 1000) {
           document.getElementById('fps').textContent = this._frameCount;
           document.getElementById('mhz').textContent = "~1.79 (approx)";
           this._frameCount = 0;
-          this._lastFpsUpdate = nowTime;
+          this._lastFpsUpdate = performance.now();
         }
         requestAnimationFrame(animate);
       };
