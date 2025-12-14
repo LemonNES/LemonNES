@@ -718,9 +718,6 @@ class Mapper4 extends Mapper {
             } else {
                 this.irqEnable = true;
             }
-        }
-    }
-}
 
  }
   // ===== Cartridge (iNES) ===== 
@@ -1402,7 +1399,7 @@ class NES {
       };
       requestAnimationFrame(animate);
     }
-    pause(){ this.running=false; }
+    pause(){ this.running=false; }}}
 }
   // ===== UI glue =====
   const canvas = document.getElementById('screen');
