@@ -960,9 +960,11 @@
     if (addr < 0x2000) return this.mapper.chrRead(addr);
     if (addr < 0x3f00) return this.vram[this.ntIndex(addr)];
     // Palette mirroring
-    let palAddr = addr & 0x1f;
-    if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
-    return this.palette[palAddr];
+    if (addr >= 0x3f00) {
+      let palAddr = addr & 0x1f;
+      if ((palAddr & 3) === 0) palAddr &= 0x0F;
+      return this.palette[palAddr];  
+    }
   }
   ppuWrite(addr, val) {
     addr &= 0x3fff;
@@ -976,9 +978,13 @@
       return;
     }
     // Palette mirroring
-    let palAddr = addr & 0x1f;
-    if ([0x10, 0x14, 0x18, 0x1c].includes(palAddr)) palAddr -= 0x10;
-    this.palette[palAddr] = val;
+    if (addr >= 0x3f00) {
+      let palAddr = addr & 0x1f;
+      // Mirror $3F10, $3F14, $3F18, $3F1C to $3F00, $3F04, $3F08, $3F0C
+      if ((palAddr & 3) === 0) palAddr &= 0x0F;
+      this.palette[palAddr] = val;
+      return;
+    } 
   }
   incCoarseX() {
     if ((this.v & 0x001f) === 31) {
@@ -1067,7 +1073,7 @@
     if (this.mask & 0x08) {
       const bit = 7 - ((x + this.x) & 7);
       bgPx = ((bg.hi >> bit) & 1) << 1 | ((bg.lo >> bit) & 1);
-      colorIndex = bgPx ? (0x10 + bg.pal + bgPx) : 0;
+      colorIndex = bgPx ? (bg.pal + bgPx) : 0;
     }
     let spriteOpaque = 0,
       spritePriority = 0,
@@ -1106,17 +1112,13 @@
     if (spriteOpaque && bgPx && sprite0 && x < 255) {
       this.status |= 0x40;
     }
-    const cindex =
-      spriteOpaque && (!spritePriority || bgPx === 0)
-        ? 0x10 + spritePalette + spPx
-        : bgPx
-        ? colorIndex
-        : this.palette[0];
-    const rgb = NTSC_PALETTE[cindex & 0x3f];
-    img[idx] = rgb[0];
-    img[idx + 1] = rgb[1];
-    img[idx + 2] = rgb[2];
-    img[idx + 3] = 255;
+   let finalColorIndex = bgPx ? colorIndex : this.palette[0];
+    
+    // Determine if sprite should cover background
+    if (spriteOpaque && (bgPx === 0 || spritePriority === 0)) {
+        finalColorIndex = 0x10 + spritePalette + spPx;
+    } 
+    const rgb = NTSC_PALETTE[finalColorIndex & 0x3f];
   }
   step() {
     // Odd-frame cycle skip
