@@ -846,6 +846,13 @@
     this.bgLatch = { lo: 0, hi: 0, pal: 0 };
     this.oddFrame = false;
     this.nmiDelay = 0;
+    // FIX: Add background shift registers for proper scrolling
+    this.bgShiftLo = 0;
+    this.bgShiftHi = 0;
+    this.bgAttrShiftLo = 0;
+    this.bgAttrShiftHi = 0;
+    this.bgNextTile = 0;
+    this.bgNextAttr = 0;
   }
   attachCanvas(canvas) {
     this.canvas = canvas;
@@ -872,6 +879,10 @@
     this.frame = 0;
     this.oddFrame = false;
     this.nmiDelay = 0;
+    this.bgShiftLo = 0;
+    this.bgShiftHi = 0;
+    this.bgAttrShiftLo = 0;
+    this.bgAttrShiftHi = 0;
   }
   read(addr) {
     switch (addr) {
@@ -880,6 +891,11 @@
         this.openBus = res;
         this.status &= ~0x80;
         this.w = 0;
+        // FIX: Clear NMI delay on status read during VBL
+        if (this.nmiDelay > 0) {
+          this.nmiDelay = 0;
+          this.nmi = false;
+        }
         return res;
       }
       case 0x2004:
@@ -892,9 +908,8 @@
           this.buffered = value;
           value = temp;
         } else {
-          // Palette reads are unbuffered, but buffer VRAM/CHR read behind it
-          // Uses V-0x1000 since v is already incremented later in this function
-          this.buffered = this.ppuRead((this.v - (this.ctrl & 0x04 ? 32 : 1)) - 0x1000); 
+          // FIX: Correct buffered read calculation for palette reads
+          this.buffered = this.ppuRead(this.v - 0x1000); 
         }
         this.v += (this.ctrl & 0x04) ? 32 : 1;
         this.v &= 0x7FFF;
@@ -1052,10 +1067,6 @@
       const row = y - sy;
       if (row >= 0 && row < h && this.spriteCount < 8) {
         if (i === 0) this.spriteZeroInLine = true;
-        const flipV = (attr >> 7) & 1;
-        const flipH = (attr >> 6) & 1;
-        const palette = (attr & 3) + 4; 
-        const priority = (attr >> 5) & 1;
         this.secOAM[this.spriteCount * 4 + 0] = sy;
         this.secOAM[this.spriteCount * 4 + 1] = tile;
         this.secOAM[this.spriteCount * 4 + 2] = attr;
@@ -1068,25 +1079,38 @@
       }
     }
   }
-  renderPixel(x, y, bg, sp) {
+  // FIX: Reloading shift registers for proper scrolling
+  reloadShifters() {
+    this.bgShiftLo = (this.bgShiftLo & 0xFF00) | this.bgLatch.lo;
+    this.bgShiftHi = (this.bgShiftHi & 0xFF00) | this.bgLatch.hi;
+    
+    const attrLo = (this.bgLatch.pal & 1) ? 0xFF : 0x00;
+    const attrHi = (this.bgLatch.pal & 2) ? 0xFF : 0x00;
+    this.bgAttrShiftLo = (this.bgAttrShiftLo & 0xFF00) | attrLo;
+    this.bgAttrShiftHi = (this.bgAttrShiftHi & 0xFF00) | attrHi;
+  }
+  
+  renderPixel(x, y) {
     const idx = (y * 256 + x) * 4;
     const img = this.output.data;
-    let bgPx = 0,
-      bgPaletteIndex = 0;
-    let spriteOpaque = 0,
-      spritePriority = 0,
-      spritePalette = 0,
-      sprite0 = false,
-      spPx = 0;
+    let bgPx = 0, bgPal = 0;
+    let spriteOpaque = false, spritePriority = 0, spritePx = 0, spritePal = 0;
+    let sprite0 = false;
 
-    // 1. Background Pixel Fetch
+    // 1. Background Pixel Fetch using shift registers
     if (this.mask & 0x08) {
-      const bit = 7 - ((x + this.x) & 7);
-      bgPx = ((bg.hi >> bit) & 1) << 1 | ((bg.lo >> bit) & 1);
-      bgPaletteIndex = bgPx ? (bg.pal + bgPx) : 0; 
+      // FIX: Use fine X scroll properly with shift registers
+      const bitMux = 15 - this.x;
+      const p0 = (this.bgShiftLo >> bitMux) & 1;
+      const p1 = (this.bgShiftHi >> bitMux) & 1;
+      bgPx = (p1 << 1) | p0;
+      
+      const a0 = (this.bgAttrShiftLo >> bitMux) & 1;
+      const a1 = (this.bgAttrShiftHi >> bitMux) & 1;
+      bgPal = (a1 << 1) | a0;
     }
 
-    // 2. Sprite Pixel Fetch (Find first opaque sprite)
+    // 2. Sprite Pixel Fetch
     if (this.mask & 0x10) {
       for (let i = 0; i < this.spriteCount; i++) {
         const o = i * 4;
@@ -1094,133 +1118,228 @@
         const tile = this.secOAM[o + 1];
         const attr = this.secOAM[o + 2];
         const sx = this.secOAM[o + 3];
-        const row = y - sy; 
         
-        // 8x8 sprite size check
-        if (x < sx || x >= sx + 8 || row < 0 || row >= 8) continue;
+        // FIX: Check if sprite is at current x position
+        if (x < sx || x >= sx + 8) continue;
+        
+        const h = (this.ctrl & 0x20) ? 16 : 8;
+        const row = y - sy;
+        if (row < 0 || row >= h) continue;
+        
+        // Sprite 0 check
+        if (i === 0 && this.spriteZeroInLine) sprite0 = true;
         
         const flipV = (attr >> 7) & 1;
         const flipH = (attr >> 6) & 1;
-        
-        const paletteBase = ((attr & 3) + 4) << 2; 
         spritePriority = (attr >> 5) & 1;
+        const paletteIdx = (attr & 3);
         
-        // Sprite 0 Check
-        if (i === 0) sprite0 = true;
+        let fineY = flipV ? (h - 1 - row) : row;
+        let tileNum = tile;
+        let base = 0;
         
-        const fineY = flipV ? (7 - row) : row;
-        const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
-        const addr = base + tile * 16 + fineY;
+        // FIX: Handle 8x16 sprites correctly
+        if (h === 16) {
+          base = (tile & 1) ? 0x1000 : 0x0000;
+          tileNum = tile & 0xFE;
+          if (fineY >= 8) {
+            tileNum++;
+            fineY -= 8;
+          }
+        } else {
+          base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
+        }
         
+        const addr = base + tileNum * 16 + fineY;
         const lo = this.ppuRead(addr);
         const hi = this.ppuRead(addr + 8);
         
         const bit = flipH ? (x - sx) : (7 - (x - sx));
-        spPx = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+        const p0 = (lo >> bit) & 1;
+        const p1 = (hi >> bit) & 1;
+        spritePx = (p1 << 1) | p0;
         
-        if (spPx) {
-          spriteOpaque = 1;
-          spritePalette = paletteBase;
+        if (spritePx !== 0) {
+          spriteOpaque = true;
+          spritePal = paletteIdx;
           break;
         }
       }
     }
 
-    // 3. Sprite Hit Check (FIX 3: Must check rendering edge)
-    if (spriteOpaque && bgPx && sprite0 && x < 255) {
-        const bgEnabled = (this.mask & 0x08) && (x >= 8 || (this.mask & 0x02));
-        const spEnabled = (this.mask & 0x10) && (x >= 8 || (this.mask & 0x04));
-        if (bgEnabled && spEnabled) {
-             this.status |= 0x40;
+    // 3. Sprite 0 Hit Detection
+    // FIX: Proper sprite 0 hit conditions
+    if (sprite0 && spriteOpaque && bgPx !== 0) {
+      // Must be in valid rendering range
+      if (x < 255 && x >= 8) {
+        const bgOn = (this.mask & 0x08) !== 0;
+        const sprOn = (this.mask & 0x10) !== 0;
+        if (bgOn && sprOn) {
+          this.status |= 0x40;
         }
+      } else if (x < 255) {
+        // Handle edge clipping
+        const leftBgOn = (this.mask & 0x02) !== 0;
+        const leftSprOn = (this.mask & 0x04) !== 0;
+        if ((this.mask & 0x08) && (this.mask & 0x10) && leftBgOn && leftSprOn) {
+          this.status |= 0x40;
+        }
+      }
     }
     
-    // 4. Final Color Selection (FIX 1: Correct Universal BG Index)
-    let finalColorIndex = 0;
-    const bgOpaque = bgPx !== 0; 
-    const spOpaque = spriteOpaque !== 0;
-
-    if (bgOpaque && spOpaque) {
-        if (spritePriority === 0) {
-            finalColorIndex = 0x10 + spritePalette + spPx;
+    // 4. Final Color Selection
+    let paletteIndex = 0;
+    
+    const bgOpaque = bgPx !== 0;
+    const sprOpaque = spriteOpaque && spritePx !== 0;
+    
+    // FIX: Proper priority and color selection
+    if (!bgOpaque && !sprOpaque) {
+      // Universal background color
+      paletteIndex = 0;
+    } else if (bgOpaque && !sprOpaque) {
+      // Background only
+      paletteIndex = (bgPal << 2) | bgPx;
+    } else if (!bgOpaque && sprOpaque) {
+      // Sprite only
+      paletteIndex = 0x10 | (spritePal << 2) | spritePx;
+    } else {
+      // Both opaque - check priority
+      if (spritePriority === 0) {
+        // Sprite in front
+        paletteIndex = 0x10 | (spritePal << 2) | spritePx;
+      } else {
+        // Background in front
+        paletteIndex = (bgPal << 2) | bgPx;
+      }
+    }
+    
+    // FIX: Handle leftmost 8 pixels clipping
+    if (x < 8) {
+      if (!(this.mask & 0x02) && bgOpaque) {
+        // Background disabled in leftmost 8 pixels
+        if (!sprOpaque) {
+          paletteIndex = 0;
+        } else if (spritePriority === 0) {
+          paletteIndex = 0x10 | (spritePal << 2) | spritePx;
         } else {
-            finalColorIndex = bgPaletteIndex;
+          paletteIndex = 0;
         }
-    } else if (bgOpaque) {
-        finalColorIndex = bgPaletteIndex;
-    } else if (spOpaque) {
-        finalColorIndex = 0x10 + spritePalette + spPx;
-    } 
-    // If neither is opaque, finalColorIndex remains 0 (Universal BG Color Index)
+      }
+      if (!(this.mask & 0x04) && sprOpaque) {
+        // Sprites disabled in leftmost 8 pixels
+        if (!bgOpaque) {
+          paletteIndex = 0;
+        } else {
+          paletteIndex = (bgPal << 2) | bgPx;
+        }
+      }
+      if (!(this.mask & 0x02) && !(this.mask & 0x04)) {
+        paletteIndex = 0;
+      }
+    }
     
-    // Apply Rendering Disables (If background/sprite is disabled on the edge, the 
-    // effective color index should be 0 unless both are disabled and it was set to 0 already.)
-    if (!(this.mask & 0x08)) {
-        // If BG rendering is off, only sprites can be drawn, or forced BG
-        if (finalColorIndex < 0x10) finalColorIndex = 0;
-    }
-    if (!(this.mask & 0x10)) {
-        // If Sprite rendering is off, any sprite color selected must be ignored
-        if (finalColorIndex >= 0x10) finalColorIndex = 0;
-    }
-
-
-    const rgb = NTSC_PALETTE[finalColorIndex & 0x3f];
+    const color = this.ppuRead(0x3F00 + (paletteIndex & 0x1F));
+    const rgb = NTSC_PALETTE[color & 0x3F];
     
     img[idx] = rgb[0];
     img[idx + 1] = rgb[1];
     img[idx + 2] = rgb[2];
     img[idx + 3] = 255;
   }
+  
   step() {
     // Tick Mapper IRQ counter first
     if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
     
+    const renderingEnabled = (this.mask & 0x18) !== 0;
+    
     // Odd-frame cycle skip
-    if (
-      this.scanline === 261 &&
-      this.cycle === 339 &&
-      (this.mask & 0x18) &&
-      this.oddFrame
-    ) {
-      this.cycle++;
+    if (this.scanline === 261 && this.cycle === 339 && renderingEnabled && this.oddFrame) {
+      this.cycle = 0;
+      this.scanline = 0;
+      this.frame++;
       this.oddFrame = false;
       return;
     }
     
-    // Visible scanlines 0-239; pre-render 261; vblank 241-260
+    // Pre-render scanline
     if (this.scanline === 261) {
       if (this.cycle === 1) {
         this.status &= ~(0x80 | 0x40 | 0x20);
       }
-      if (this.cycle >= 280 && this.cycle <= 304 && (this.mask & 0x18)) {
+      if (this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) {
         this.copyY();
       }
     }
+    
+    // Visible scanlines
     if (this.scanline >= 0 && this.scanline < 240) {
       if (this.cycle === 0) {
+        // Idle
       } else if (this.cycle === 1) {
         this.evalSprites();
       }
+      
+      // Background and sprite tile fetching (cycles 1-256)
       if (this.cycle >= 1 && this.cycle <= 256) {
-        if ((this.cycle - 1) % 8 === 0) {
+        // FIX: Shift registers every cycle for smooth scrolling
+        if (renderingEnabled) {
+          this.bgShiftLo <<= 1;
+          this.bgShiftHi <<= 1;
+          this.bgAttrShiftLo <<= 1;
+          this.bgAttrShiftHi <<= 1;
+        }
+        
+        // Fetch background tiles every 8 cycles
+        const cycleInTile = (this.cycle - 1) % 8;
+        if (cycleInTile === 0 && renderingEnabled) {
+          this.reloadShifters();
           this.bgLatch = this.bgFetch();
         }
+        
+        // Render pixel
         const x = this.cycle - 1;
         const y = this.scanline;
-        this.renderPixel(x, y, this.bgLatch, null);
-        if ((this.cycle & 7) === 0) {
+        this.renderPixel(x, y);
+        
+        // Increment coarse X every 8 cycles
+        if (cycleInTile === 7 && renderingEnabled) {
           this.incCoarseX();
         }
       }
-      // FIX 2: Horizontal VRAM update must be conditioned on mask
-      if (this.cycle === 257) {
-        if (this.mask & 0x18) this.copyX();
-      }
-      if (this.cycle === 256) {
+      
+      // Increment Y at cycle 256
+      if (this.cycle === 256 && renderingEnabled) {
         this.incY();
       }
+      
+      // Copy horizontal position at cycle 257
+      if (this.cycle === 257 && renderingEnabled) {
+        this.copyX();
+      }
+      
+      // FIX: Pre-fetch for next scanline (cycles 321-336)
+      if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
+        if (renderingEnabled) {
+          this.bgShiftLo <<= 1;
+          this.bgShiftHi <<= 1;
+          this.bgAttrShiftLo <<= 1;
+          this.bgAttrShiftHi <<= 1;
+        }
+        
+        const cycleInTile = (this.cycle - 1) % 8;
+        if (cycleInTile === 0) {
+          this.reloadShifters();
+          this.bgLatch = this.bgFetch();
+        }
+        if (cycleInTile === 7) {
+          this.incCoarseX();
+        }
+      }
     }
+    
+    // VBlank start
     if (this.scanline === 241 && this.cycle === 1) {
       this.status |= 0x80;
       if (this.ctrl & 0x80) {
@@ -1228,12 +1347,15 @@
       }
       this.ctx.putImageData(this.output, 0, 0);
     }
+    
+    // NMI delay handling
     if (this.nmiDelay > 0) {
       this.nmiDelay--;
       if (this.nmiDelay === 0) {
         this.nmi = true;
       }
     }
+    
     this.cycle++;
     if (this.cycle > 340) {
       this.cycle = 0;
