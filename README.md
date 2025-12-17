@@ -24,7 +24,7 @@ The Following Games Have Been Tested With LemonNES
 
 • Balloon Fight - Runs Great
 
-• Exitebike - Runs Great
+• Excitebike - Runs Great
 
 • Bubble Bobble - Runs Great With Some Graphical Bugs
 
