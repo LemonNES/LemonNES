@@ -576,7 +576,7 @@
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
   
-  // ===== Mapper 4 (MMC3) =====
+    // ===== Mapper 4 (MMC3) =====
   class Mapper4 extends Mapper {
     constructor(cart) {
         super(cart);
@@ -584,19 +584,19 @@
         this.ppu = null;
 
         // Registers
-        this.bankSelect = 0;
-        this.bankData = new Uint8Array(8);
-        this.prgMode = 0;
-        this.chrMode = 0;
+        this.bankSelect = 0; // $8000 (even)
+        this.bankData = new Uint8Array(8); // $8001 (odd)
+        this.prgMode = 0; // bit 6 of $8000
+        this.chrMode = 0; // bit 7 of $8000
         
         // IRQ
-        this.irqLatch = 0;
+        this.irqLatch = 0; // $C000 (even)
         this.irqCounter = 0;
-        this.irqEnable = false;
-        this.irqReload = false;
+        this.irqEnable = false; // $E001 (odd)
+        this.irqReload = false; // Set by $C001 (odd)
         
         // Banks
-        this.prgBanks = new Uint8Array(4);
+        this.prgBanks = new Uint8Array(4); // $8000, $A000, $C000, $E000
         this.chrBanks = new Uint8Array(8);
         
         // Setup default banks
@@ -605,19 +605,22 @@
         this.updatePrgMapping();
         this.updateChrMapping();
     }
-
-    // --- Glue Logic ---
+    
+    // --- System Glue ---
+    // The mapper connects to the PPU and clocks on specific cycles.
     ppuCycle() {
         if (!this.ppu) return;
 
-        // [FIX] MMC3 must clock on visible scanlines (0-239) AND the pre-render scanline (261).
-        // Excluding 261 causes the IRQ to fire 1 line late, pushing HUDs down.
+        // MMC3 clocks the IRQ counter on the falling edge of PPU A12, 
+        // which occurs during sprite fetches (cycle 260 of visible scanlines and pre-render scanline 261).
         const rendering = (this.ppu.mask & 0x18);
         const scanline = this.ppu.scanline;
         const cycle = this.ppu.cycle;
 
+        // Clock only when rendering is enabled (for both background and sprites)
+        // and on visible scanlines (0-239) or the pre-render scanline (261).
         if (rendering && (scanline === 261 || (scanline >= 0 && scanline <= 239))) {
-            // Cycle 260 is a safe approximation for the A12 rise during sprite fetches
+            // Cycle 260 is the most common and reliable approximation for the A12 rise/fall event
             if (cycle === 260) {
                 this.scanlineTick();
             }
@@ -625,114 +628,155 @@
     }
 
     scanlineTick() {
-        if (this.irqCounter === 0 || this.irqReload) {
-            this.irqCounter = this.irqLatch;
-            this.irqReload = false;
-        } else {
+        // Correct MMC3 IRQ Logic:
+        // 1. If counter is 0: The counter holds 0. If the game has requested a reload ($C001 write), 
+        //    it reloads on the next tick.
+        if (this.irqCounter === 0) {
+            if (this.irqReload) { 
+                this.irqCounter = this.irqLatch;
+                this.irqReload = false;
+            }
+        } 
+        // 2. If counter is non-zero: Decrement it.
+        else {
             this.irqCounter--;
         }
         
+        // 3. Check for IRQ trigger AFTER decrement/reload.
         if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
             this.cpu.irqLine = true;
         }
     }
 
-    // --- CPU Handling (includes WRAM) ---
+    // --- CPU Handling (0x8000 - 0xFFFF) ---
     prgRead(addr) {
+        // WRAM / SRAM (0x6000 - 0x7FFF)
         if (addr >= 0x6000 && addr <= 0x7FFF) {
             return this.cart.sram[addr - 0x6000];
         }
-        let bankIdx = (addr - 0x8000) >> 13;
+        
+        // PRG-ROM (0x8000 - 0xFFFF)
+        let bankIdx = (addr - 0x8000) >> 13; // 0, 1, 2, or 3
         let bank = this.prgBanks[bankIdx];
         return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
     }
 
     prgWrite(addr, val) {
+        // WRAM / SRAM
         if (addr >= 0x6000 && addr <= 0x7FFF) {
             this.cart.sram[addr - 0x6000] = val;
             return;
         }
+        // Register writes
         this.writeRegister(addr, val);
     }
 
-    // --- PPU Handling (includes CHR Mode Swap) ---
+    // --- PPU Handling (0x0000 - 0x1FFF) ---
     chrRead(addr) {
-        let index = addr >> 10;
+        let index = addr >> 10; // 0 to 7 (1KB bank index)
         let offset = addr & 0x3FF;
-        let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
+        
+        // Apply CHR Mode to map the index to the correct register
+        // chrMode=0: [0-3] maps to R[0]-R[3], [4-7] maps to R[4]-R[7]
+        // chrMode=1: [0-3] maps to R[4]-R[7], [4-7] maps to R[0]-R[3]
+        let bankIndex = index;
+        if (this.chrMode === 1) {
+            bankIndex = (index < 4) ? index + 4 : index - 4;
+        }
+
         let bank = this.chrBanks[bankIndex];
-        const total = this.cart.chr.length >> 10;
-        if (total > 0) bank %= total;
+        const total = this.cart.chr.length >> 10; // Total 1KB banks in CHR data
+        if (total > 0) bank %= total; // Clamp bank index if CHR data is small
+
         return this.cart.chr[(bank * 1024) + offset];
     }
 
     chrWrite(addr, val) {
+        // Only allow writes to CHR-RAM, not CHR-ROM
         if (this.cart.chrROM) return;
-        let index = addr >> 10;
+        
+        let index = addr >> 10; 
         let offset = addr & 0x3FF;
-        let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
+        
+        // Apply CHR Mode (same as chrRead)
+        let bankIndex = index;
+        if (this.chrMode === 1) {
+            bankIndex = (index < 4) ? index + 4 : index - 4;
+        }
+
         let bank = this.chrBanks[bankIndex];
-        const total = this.cart.chr.length >> 10;
-        if (total > 0) bank %= total;
+        const total = this.cart.chr.length >> 10; 
+        if (total > 0) bank %= total; 
+
         this.cart.chr[(bank * 1024) + offset] = val;
     }
 
-    // --- Register Implementation ---
+    // --- Register Implementation (0x8000 - 0xFFFF) ---
     writeRegister(addr, val) {
         if (addr < 0x8000) return;
 
-        // Even: Select / Mirroring / IRQ Latch / Disable
+        // Even Addresses (Select/Mirroring/Latch/Disable)
         if ((addr & 1) === 0) {
-            if (addr < 0xA000) { // $8000 Bank Select
+            if (addr < 0xA000) { // $8000: Bank Select
                 this.bankSelect = val;
                 const p = (val >> 6) & 1, c = (val >> 7) & 1;
+                // Update mapping only if mode changes
                 if (this.prgMode !== p) { this.prgMode = p; this.updatePrgMapping(); }
                 if (this.chrMode !== c) { this.chrMode = c; this.updateChrMapping(); }
             } 
-            else if (addr < 0xC000) { // $A000 Mirroring
+            else if (addr < 0xC000) { // $A000: Mirroring
                 if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
             } 
-            else if (addr < 0xE000) { // $C000 IRQ Latch
+            else if (addr < 0xE000) { // $C000: IRQ Latch
                 this.irqLatch = val;
             } 
-            else { // $E000 IRQ Disable
+            else { // $E000: IRQ Disable
                 this.irqEnable = false;
+                this.irqReload = false; // Disabling IRQ also resets the reload flag
                 if (this.cpu) this.cpu.irqLine = false;
             }
         } 
-        // Odd: Data / PRG Protect / IRQ Reload / Enable
+        // Odd Addresses (Data/PRG Protect/Reload/Enable)
         else {
-            if (addr < 0xA000) { // $8001 Bank Data
+            if (addr < 0xA000) { // $8001: Bank Data
                 this.bankData[this.bankSelect & 7] = val;
+                // R6 and R7 are PRG, R0-R5 are CHR
                 (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping();
             }
-            else if (addr < 0xC000) { /* PRG RAM Protect */ }
-            else if (addr < 0xE000) { // $C001 IRQ Reload
-                this.irqCounter = 0; 
+            else if (addr < 0xC000) { /* $A001: PRG RAM Protect (unused in most emus) */ }
+            else if (addr < 0xE000) { // $C001: IRQ Reload
+                // Set the flag to reload the counter on the next scanline tick
                 this.irqReload = true; 
             } 
-            else { // $E001 IRQ Enable
+            else { // $E001: IRQ Enable
                 this.irqEnable = true; 
             }
         }
     }
 
     updatePrgMapping() {
-        const b8 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1;
-        const bC = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
+        // $C000 (Bank 2) and $E000 (Bank 3) are fixed or switched based on prgMode
+        const b8 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1; // $8000 bank
+        const bC = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6]; // $C000 bank
+        
         this.prgBanks[0] = b8;
-        this.prgBanks[1] = this.bankData[7];
+        this.prgBanks[1] = this.bankData[7]; // $A000 bank
         this.prgBanks[2] = bC;
-        this.prgBanks[3] = this.lastBank;
+        this.prgBanks[3] = this.lastBank; // $E000 bank is always the last PRG bank
     }
+    
     updateChrMapping() {
         const R = this.bankData;
+        
+        // R0, R1 map two 1KB banks each (0x0000 - 0x07FF, 0x0800 - 0x0FFF)
         this.chrBanks[0] = R[0] & 0xFE; this.chrBanks[1] = R[0] | 1;
         this.chrBanks[2] = R[1] & 0xFE; this.chrBanks[3] = R[1] | 1;
+        
+        // R2-R5 map one 1KB bank each (0x1000 - 0x1FFF)
         this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3];
         this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
     }
-  }   
+  }
   // ===== Cartridge (iNES) =====
   class Cartridge {
     constructor(bytes) {
