@@ -796,7 +796,8 @@
       if(addr>=0x6000){this.ppu.cart.sram[addr-0x6000]=val; return;}
     }
   }
- class PPU {
+
+class PPU {
     constructor() {
       this.v = 0;
       this.t = 0;
@@ -845,10 +846,12 @@
 
     connectCart(cart) {
       this.cart = cart;
-      this.mapper = [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4][cart.mapper]
-        ? new [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4][cart.mapper](cart)
-        : new Mapper0(cart);
-      if(this.mapper && this.mapper instanceof Mapper4) {
+      // Initialize Mapper
+      const MapperClass = [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4][cart.mapper];
+      this.mapper = MapperClass ? new MapperClass(cart) : new Mapper0(cart);
+      
+      // Link PPU to Mapper (Critical for MMC3 IRQs)
+      if(this.mapper) {
           this.mapper.ppu = this; 
       }
       this.mirror = cart.mirror;
@@ -947,21 +950,13 @@
       this.openBus = val;
     }
 
-    doDMA(buf) {
-      for (let i = 0; i < 256; i++) this.oam[(this.oamaddr + i) & 0xff] = buf[i];
-    }
-
     ntIndex(addr) {
       const a = (addr - 0x2000) & 0x0fff;
       const nt = (a >> 10) & 3;
       const off = a & 0x03ff;
       
-      // [FIX] Mirroring Priority Logic
-      // Mapper 1 updates cart.mirror (accessed via mapper.mirroring)
-      // Mapper 4 updates ppu.mirror directly.
-      // We must check if the mapper relies on the internal PPU mirror state (Mapper 4)
-      // or if we should fallback to the cartridge getter (Mapper 1).
-      
+      // Priority: PPU Internal Mirror > Mapper 1 Cart Mirror
+      // This ensures Mapper 4 (MMC3) games like Kirby/SMB3 control mirroring correctly
       let mode = this.mirror;
       if (this.cart && this.cart.mapper === 1) {
           mode = this.mapper.mirroring;
@@ -1107,19 +1102,16 @@
       let spriteOpaque = false, spritePriority = 0, spritePx = 0, spritePal = 0;
       let sprite0 = false;
 
-      // 1. Background Pixel Fetch
       if (this.mask & 0x08) {
         const bitMux = 15 - this.x;
         const p0 = (this.bgShiftLo >> bitMux) & 1;
         const p1 = (this.bgShiftHi >> bitMux) & 1;
         bgPx = (p1 << 1) | p0;
-        
         const a0 = (this.bgAttrShiftLo >> bitMux) & 1;
         const a1 = (this.bgAttrShiftHi >> bitMux) & 1;
         bgPal = (a1 << 1) | a0;
       }
 
-      // 2. Sprite Pixel Fetch
       if (this.mask & 0x10) {
         for (let i = 0; i < this.spriteCount; i++) {
           const o = i * 4;
@@ -1129,7 +1121,6 @@
           const sx = this.secOAM[o + 3];
           
           if (x < sx || x >= sx + 8) continue;
-          
           const h = (this.ctrl & 0x20) ? 16 : 8;
           const row = y - sy - 1;
           
@@ -1174,7 +1165,6 @@
         }
       }
 
-      // 3. Sprite 0 Hit
       if (sprite0 && spriteOpaque && bgPx !== 0) {
         if (x < 255 && x >= 8) {
           const bgOn = (this.mask & 0x08) !== 0;
@@ -1189,23 +1179,16 @@
         }
       }
       
-      // 4. Final Color Selection
       let paletteIndex = 0;
       const bgOpaque = bgPx !== 0;
       const sprOpaque = spriteOpaque && spritePx !== 0;
       
-      if (!bgOpaque && !sprOpaque) {
-        paletteIndex = 0;
-      } else if (bgOpaque && !sprOpaque) {
-        paletteIndex = (bgPal << 2) | bgPx;
-      } else if (!bgOpaque && sprOpaque) {
-        paletteIndex = 0x10 | (spritePal << 2) | spritePx;
-      } else {
-        if (spritePriority === 0) {
-          paletteIndex = 0x10 | (spritePal << 2) | spritePx;
-        } else {
-          paletteIndex = (bgPal << 2) | bgPx;
-        }
+      if (!bgOpaque && !sprOpaque) paletteIndex = 0;
+      else if (bgOpaque && !sprOpaque) paletteIndex = (bgPal << 2) | bgPx;
+      else if (!bgOpaque && sprOpaque) paletteIndex = 0x10 | (spritePal << 2) | spritePx;
+      else {
+        if (spritePriority === 0) paletteIndex = 0x10 | (spritePal << 2) | spritePx;
+        else paletteIndex = (bgPal << 2) | bgPx;
       }
       
       if (x < 8) {
@@ -1223,7 +1206,6 @@
       
       const color = this.ppuRead(0x3F00 + (paletteIndex & 0x1F));
       const rgb = NTSC_PALETTE[color & 0x3F];
-      
       img[idx] = rgb[0];
       img[idx + 1] = rgb[1];
       img[idx + 2] = rgb[2];
@@ -1231,16 +1213,20 @@
     }
     
     step() {
+      // Run generic mapper cycles (for Mappers that need per-CPU or per-PPU tick updates)
       if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
       
       const renderingEnabled = (this.mask & 0x18) !== 0;
+      const isVisibleLine = this.scanline >= 0 && this.scanline < 240;
+      const isPreRender = this.scanline === 261;
       
-      // OAM Address Reset (Cycles 257-320 of Pre-render)
-      if (this.scanline === 261 && this.cycle >= 257 && this.cycle <= 320) {
+      // OAM Reset on Pre-render
+      if (isPreRender && this.cycle >= 257 && this.cycle <= 320) {
           this.oamaddr = 0;
       }
 
-      if (this.scanline === 261 && this.cycle === 339 && renderingEnabled && this.oddFrame) {
+      // Start of Frame
+      if (isPreRender && this.cycle === 339 && renderingEnabled && this.oddFrame) {
         this.cycle = 0;
         this.scanline = 0;
         this.frame++;
@@ -1248,61 +1234,63 @@
         return;
       }
       
-      // Pre-render
-      if (this.scanline === 261) {
-        if (this.cycle === 1) this.status &= ~(0x80 | 0x40 | 0x20);
-        if (this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) this.copyY();
+      // Pre-render and Visible Scanlines share mostly the same logic for fetches
+      if (isPreRender || isVisibleLine) {
+        // Clear status flags at start of pre-render
+        if (isPreRender && this.cycle === 1) {
+            this.status &= ~(0x80 | 0x40 | 0x20);
+        }
+
+        // Sprite Evaluation (Visible lines only)
+        if (isVisibleLine && this.cycle === 1 && renderingEnabled) {
+            this.evalSprites();
+        }
         
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 7) this.incCoarseX();
+        // --- MEMORY FETCHING PHASE (Cycles 1-256 and 321-336) ---
+        if ((this.cycle >= 1 && this.cycle <= 256) || (this.cycle >= 321 && this.cycle <= 336)) {
+             if (renderingEnabled) {
+                this.bgShiftLo <<= 1;
+                this.bgShiftHi <<= 1;
+                this.bgAttrShiftLo <<= 1;
+                this.bgAttrShiftHi <<= 1;
+             }
+             
+             const cycleInTile = (this.cycle - 1) % 8;
+             if (renderingEnabled) {
+                 if (cycleInTile === 0) this.reloadShifters();
+                 if (cycleInTile === 1) this.bgLatch = this.bgFetch();
+                 if (cycleInTile === 7) this.incCoarseX();
+             }
+             
+             // Render pixel (Visible lines only, Cycles 1-256)
+             if (isVisibleLine && this.cycle <= 256) {
+                 this.renderPixel(this.cycle - 1, this.scanline);
+             }
+        }
+        
+        // Vertical Increment (Cycle 256)
+        if (this.cycle === 256 && renderingEnabled) {
+            this.incY();
+        }
+        
+        // Reset Coarse X (Cycle 257)
+        if (this.cycle === 257 && renderingEnabled) {
+            this.copyX();
+        }
+        
+        // --- MMC3 IRQ CLOCK (Critical for Kirby/SMB3) ---
+        // Must fire on Pre-render AND Visible lines at cycle 260
+        if (this.cycle === 260 && renderingEnabled && this.mapper && this.mapper.scanline) {
+            this.mapper.scanline();
+        }
+
+        // Reset Vertical Y (Pre-render, Cycle 280-304)
+        if (isPreRender && this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) {
+            this.copyY();
         }
       }
       
-      // Visible Scanlines
-      if (this.scanline >= 0 && this.scanline < 240) {
-        if (this.cycle === 1 && renderingEnabled) this.evalSprites();
-        
-        if (this.cycle >= 1 && this.cycle <= 256) {
-          if (renderingEnabled) {
-            this.bgShiftLo <<= 1;
-            this.bgShiftHi <<= 1;
-            this.bgAttrShiftLo <<= 1;
-            this.bgAttrShiftHi <<= 1;
-          }
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && renderingEnabled) this.reloadShifters();
-          if (cycleInTile === 1 && renderingEnabled) this.bgLatch = this.bgFetch();
-          
-          this.renderPixel(this.cycle - 1, this.scanline);
-          
-          if (cycleInTile === 7 && renderingEnabled) this.incCoarseX();
-        }
-        
-        if (this.cycle === 256 && renderingEnabled) this.incY();
-        if (this.cycle === 257 && renderingEnabled) this.copyX();
-        
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 7) this.incCoarseX();
-        }
-      }
-      
+      // Post-Render (Scanline 241)
       if (this.scanline === 241 && this.cycle === 1) {
         this.status |= 0x80;
         if (this.ctrl & 0x80) this.nmiDelay = 2; 
