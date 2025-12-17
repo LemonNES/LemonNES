@@ -955,11 +955,24 @@
       const a = (addr - 0x2000) & 0x0fff;
       const nt = (a >> 10) & 3;
       const off = a & 0x03ff;
-      const mirror = this.mapper.mirroring || this.mirror; 
       
-      if (mirror === "vertical") return ((nt & 1) * 0x400) + off;
-      if (mirror === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
-      if (mirror === "four") return a;
+      // [FIX] Mirroring Priority Logic
+      // Mapper 1 updates cart.mirror (accessed via mapper.mirroring)
+      // Mapper 4 updates ppu.mirror directly.
+      // We must check if the mapper relies on the internal PPU mirror state (Mapper 4)
+      // or if we should fallback to the cartridge getter (Mapper 1).
+      
+      let mode = this.mirror;
+      if (this.cart && this.cart.mapper === 1) {
+          mode = this.mapper.mirroring;
+      }
+      
+      if (mode === "vertical") return ((nt & 1) * 0x400) + off;
+      if (mode === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
+      if (mode === "four") return a;
+      if (mode === "single0") return off;
+      if (mode === "single1") return 0x400 + off;
+      
       return off; 
     }
 
@@ -1070,9 +1083,6 @@
         const attr = this.oam[o + 2];
         const sx = this.oam[o + 3];
         const h = (this.ctrl & 0x20) ? 16 : 8;
-        
-        // [FIX] Sprite Y is technically sy + 1. 
-        // We calculate row based on y - (sy + 1) -> y - sy - 1.
         const row = y - sy - 1; 
         
         if (row >= 0 && row < h && this.spriteCount < 8) {
@@ -1121,8 +1131,6 @@
           if (x < sx || x >= sx + 8) continue;
           
           const h = (this.ctrl & 0x20) ? 16 : 8;
-          
-          // [FIX] Apply the same Y offset fix here
           const row = y - sy - 1;
           
           if (row < 0 || row >= h) continue;
@@ -1227,6 +1235,11 @@
       
       const renderingEnabled = (this.mask & 0x18) !== 0;
       
+      // OAM Address Reset (Cycles 257-320 of Pre-render)
+      if (this.scanline === 261 && this.cycle >= 257 && this.cycle <= 320) {
+          this.oamaddr = 0;
+      }
+
       if (this.scanline === 261 && this.cycle === 339 && renderingEnabled && this.oddFrame) {
         this.cycle = 0;
         this.scanline = 0;
@@ -1277,11 +1290,6 @@
         if (this.cycle === 256 && renderingEnabled) this.incY();
         if (this.cycle === 257 && renderingEnabled) this.copyX();
         
-        // MMC3 IRQ Hook at cycle 260
-        if (this.cycle === 260 && renderingEnabled && this.mapper && this.mapper.scanline) {
-           this.mapper.scanline();
-        }
-        
         if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
           this.bgShiftLo <<= 1;
           this.bgShiftHi <<= 1;
@@ -1317,7 +1325,7 @@
         }
       }
     }
-  } 
+  }
   
   // NES color palette
   const NTSC_PALETTE = [
