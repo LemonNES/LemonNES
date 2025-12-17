@@ -748,12 +748,23 @@ class Mapper90 extends Mapper {
     this.ctrl = 0; // Control register for mirroring
   }
 
-  // PRG Read: $8000-$FFFF is 32KB banked/fixed
+// PRG Read: $6000-$7FFF is WRAM, $8000-$FFFF is banked ROM
   prgRead(addr) {
+    // 1. WRAM/SRAM Access
+    if (addr >= 0x6000 && addr <= 0x7FFF) {
+      // Check if WRAM is enabled (A common MMC3-style convention, though
+      // Mapper 90 typically has it permanently enabled or controlled by a hidden bit)
+      // Assuming it's enabled if it exists:
+      if (this.cart.sram) {
+          return this.cart.sram[addr - 0x6000];
+      }
+      return 0x00; // Open bus if no SRAM
+    }
+    
+    // 2. ROM Access (Original Logic)
     const prgSize = this.cart.prg.length;
     // $8000-$BFFF: Switchable 16KB bank
     if (addr < 0xC000) {
-      // Mask ensures the bank index stays within the bounds of the PRG ROM size
       const bankIndex = this.prgBank & ((prgSize / 0x4000) - 1);
       const base = bankIndex * 0x4000;
       return this.cart.prg[base + (addr - 0x8000)];
@@ -764,9 +775,17 @@ class Mapper90 extends Mapper {
     }
   }
 
-  // PRG Write: Bankswitching occurs via writes to $8000-$FFFF
+  // PRG Write: Handles WRAM writes and Register writes
   prgWrite(addr, val) {
-    // This uses a common register scheme for Mapper 90.
+    // 1. WRAM/SRAM Write
+    if (addr >= 0x6000 && addr <= 0x7FFF) {
+        if (this.cart.sram) {
+            this.cart.sram[addr - 0x6000] = val;
+        }
+        return;
+    }
+    
+    // 2. Register Writes (Original Logic)
     // Writes to $8000-$8003: PRG Bank Select
     if (addr >= 0x8000 && addr <= 0x8003) {
       this.prgBank = val; 
@@ -778,12 +797,10 @@ class Mapper90 extends Mapper {
     // Writes to $8006-$8007: Control/Mirroring Register
     else if (addr >= 0x8006 && addr <= 0x8007) {
       this.ctrl = val;
-      // Mirroring is typically controlled by bit 0 of the control register
       const mirrorBit = val & 1; 
       this.cart.mirror = (mirrorBit === 0) ? 'vertical' : 'horizontal';
     }
   }
-
   // CHR Read: $0000-$1FFF is switchable 8KB bank
   chrRead(addr) {
     const chrSize = this.cart.chr.length;
