@@ -883,7 +883,7 @@ class Mapper90 extends Mapper {
       if(addr>=0x6000){this.ppu.cart.sram[addr-0x6000]=val; return;}
     }
   }
-  class PPU {
+   class PPU {
     constructor() {
       this.v = 0;
       this.t = 0;
@@ -932,10 +932,12 @@ class Mapper90 extends Mapper {
 
     connectCart(cart) {
       this.cart = cart;
-      this.mapper = [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4][cart.mapper]
-        ? new [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4][cart.mapper](cart)
-        : new Mapper0(cart);
-      if(this.mapper && this.mapper instanceof Mapper4) {
+      // Initialize Mapper
+      const MapperClass = [Mapper0, Mapper1, Mapper2, Mapper3, Mapper4][cart.mapper];
+      this.mapper = MapperClass ? new MapperClass(cart) : new Mapper0(cart);
+      
+      // Link PPU to Mapper (Critical for MMC3 IRQs)
+      if(this.mapper) {
           this.mapper.ppu = this; 
       }
       this.mirror = cart.mirror;
@@ -1042,11 +1044,18 @@ class Mapper90 extends Mapper {
       const a = (addr - 0x2000) & 0x0fff;
       const nt = (a >> 10) & 3;
       const off = a & 0x03ff;
-      const mirror = this.mapper.mirroring || this.mirror; 
       
-      if (mirror === "vertical") return ((nt & 1) * 0x400) + off;
-      if (mirror === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
-      if (mirror === "four") return a;
+      let mode = this.mirror;
+      if (this.cart && this.cart.mapper === 1) {
+          mode = this.mapper.mirroring;
+      }
+      
+      if (mode === "vertical") return ((nt & 1) * 0x400) + off;
+      if (mode === "horizontal") return (((nt >> 1) & 1) * 0x400) + off;
+      if (mode === "four") return a;
+      if (mode === "single0") return off;
+      if (mode === "single1") return 0x400 + off;
+      
       return off; 
     }
 
@@ -1125,9 +1134,6 @@ class Mapper90 extends Mapper {
       const coarseX = this.v & 0x1F;
       const coarseY = (this.v >> 5) & 0x1F;
       const shift = ((coarseY & 2) << 1) | (coarseX & 2);
-      
-      // [FIX] Removed the extra << 2 shift. 
-      // reloadShifters expects bits 0-1 to contain the palette index (0-3).
       const pal = (attr >> shift) & 3; 
       
       const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
@@ -1142,7 +1148,6 @@ class Mapper90 extends Mapper {
       this.bgShiftLo = (this.bgShiftLo & 0xFF00) | this.bgLatch.lo;
       this.bgShiftHi = (this.bgShiftHi & 0xFF00) | this.bgLatch.hi;
       
-      // Expand the 2-bit palette index into full bytes for the shift registers
       const attrLo = (this.bgLatch.pal & 1) ? 0xFF : 0x00;
       const attrHi = (this.bgLatch.pal & 2) ? 0xFF : 0x00;
       
@@ -1161,7 +1166,8 @@ class Mapper90 extends Mapper {
         const attr = this.oam[o + 2];
         const sx = this.oam[o + 3];
         const h = (this.ctrl & 0x20) ? 16 : 8;
-        const row = y - sy;
+        const row = y - sy - 1; 
+        
         if (row >= 0 && row < h && this.spriteCount < 8) {
           if (i === 0) this.spriteZeroInLine = true;
           this.secOAM[this.spriteCount * 4 + 0] = sy;
@@ -1184,19 +1190,16 @@ class Mapper90 extends Mapper {
       let spriteOpaque = false, spritePriority = 0, spritePx = 0, spritePal = 0;
       let sprite0 = false;
 
-      // 1. Background Pixel Fetch
       if (this.mask & 0x08) {
         const bitMux = 15 - this.x;
         const p0 = (this.bgShiftLo >> bitMux) & 1;
         const p1 = (this.bgShiftHi >> bitMux) & 1;
         bgPx = (p1 << 1) | p0;
-        
         const a0 = (this.bgAttrShiftLo >> bitMux) & 1;
         const a1 = (this.bgAttrShiftHi >> bitMux) & 1;
         bgPal = (a1 << 1) | a0;
       }
 
-      // 2. Sprite Pixel Fetch
       if (this.mask & 0x10) {
         for (let i = 0; i < this.spriteCount; i++) {
           const o = i * 4;
@@ -1206,9 +1209,9 @@ class Mapper90 extends Mapper {
           const sx = this.secOAM[o + 3];
           
           if (x < sx || x >= sx + 8) continue;
-          
           const h = (this.ctrl & 0x20) ? 16 : 8;
-          const row = y - sy;
+          const row = y - sy - 1;
+          
           if (row < 0 || row >= h) continue;
           
           if (i === 0 && this.spriteZeroInLine) sprite0 = true;
@@ -1250,7 +1253,6 @@ class Mapper90 extends Mapper {
         }
       }
 
-      // 3. Sprite 0 Hit
       if (sprite0 && spriteOpaque && bgPx !== 0) {
         if (x < 255 && x >= 8) {
           const bgOn = (this.mask & 0x08) !== 0;
@@ -1265,26 +1267,18 @@ class Mapper90 extends Mapper {
         }
       }
       
-      // 4. Final Color Selection
       let paletteIndex = 0;
       const bgOpaque = bgPx !== 0;
       const sprOpaque = spriteOpaque && spritePx !== 0;
       
-      if (!bgOpaque && !sprOpaque) {
-        paletteIndex = 0;
-      } else if (bgOpaque && !sprOpaque) {
-        paletteIndex = (bgPal << 2) | bgPx;
-      } else if (!bgOpaque && sprOpaque) {
-        paletteIndex = 0x10 | (spritePal << 2) | spritePx;
-      } else {
-        if (spritePriority === 0) {
-          paletteIndex = 0x10 | (spritePal << 2) | spritePx;
-        } else {
-          paletteIndex = (bgPal << 2) | bgPx;
-        }
+      if (!bgOpaque && !sprOpaque) paletteIndex = 0;
+      else if (bgOpaque && !sprOpaque) paletteIndex = (bgPal << 2) | bgPx;
+      else if (!bgOpaque && sprOpaque) paletteIndex = 0x10 | (spritePal << 2) | spritePx;
+      else {
+        if (spritePriority === 0) paletteIndex = 0x10 | (spritePal << 2) | spritePx;
+        else paletteIndex = (bgPal << 2) | bgPx;
       }
       
-      // Leftmost 8 pixels clipping
       if (x < 8) {
         if (!(this.mask & 0x02) && bgOpaque) {
           if (!sprOpaque) paletteIndex = 0;
@@ -1300,7 +1294,6 @@ class Mapper90 extends Mapper {
       
       const color = this.ppuRead(0x3F00 + (paletteIndex & 0x1F));
       const rgb = NTSC_PALETTE[color & 0x3F];
-      
       img[idx] = rgb[0];
       img[idx + 1] = rgb[1];
       img[idx + 2] = rgb[2];
@@ -1308,11 +1301,19 @@ class Mapper90 extends Mapper {
     }
     
     step() {
-      if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
+      // [FIX] Removed generic this.mapper.ppuCycle() hook to prevent double-clocking MMC3 IRQ.
       
       const renderingEnabled = (this.mask & 0x18) !== 0;
+      const isVisibleLine = this.scanline >= 0 && this.scanline < 240;
+      const isPreRender = this.scanline === 261;
       
-      if (this.scanline === 261 && this.cycle === 339 && renderingEnabled && this.oddFrame) {
+      // OAM Reset on Pre-render
+      if (isPreRender && this.cycle >= 257 && this.cycle <= 320) {
+          this.oamaddr = 0;
+      }
+
+      // Start of Frame logic (Odd frame skip)
+      if (isPreRender && this.cycle === 339 && renderingEnabled && this.oddFrame) {
         this.cycle = 0;
         this.scanline = 0;
         this.frame++;
@@ -1320,72 +1321,77 @@ class Mapper90 extends Mapper {
         return;
       }
       
-      // Pre-render
-      if (this.scanline === 261) {
-        if (this.cycle === 1) this.status &= ~(0x80 | 0x40 | 0x20);
-        if (this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) this.copyY();
+      // Pre-render and Visible Scanlines share mostly the same logic for fetches
+      if (isPreRender || isVisibleLine) {
         
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 7) this.incCoarseX();
+        // Clear status flags at start of pre-render
+        if (isPreRender && this.cycle === 1) {
+            this.status &= ~(0x80 | 0x40 | 0x20);
+        }
+
+        // Sprite Evaluation (Visible lines only)
+        if (isVisibleLine && this.cycle === 1 && renderingEnabled) {
+            this.evalSprites();
+        }
+        
+        // --- MEMORY FETCHING PHASE (Cycles 1-256 and 321-336) ---
+        if ((this.cycle >= 1 && this.cycle <= 256) || (this.cycle >= 321 && this.cycle <= 336)) {
+             if (renderingEnabled) {
+                this.bgShiftLo <<= 1;
+                this.bgShiftHi <<= 1;
+                this.bgAttrShiftLo <<= 1;
+                this.bgAttrShiftHi <<= 1;
+             }
+             
+             const cycleInTile = (this.cycle - 1) % 8;
+             if (renderingEnabled) {
+                 if (cycleInTile === 0) this.reloadShifters();
+                 if (cycleInTile === 1 && !(!isVisibleLine && this.cycle > 336)) this.bgLatch = this.bgFetch();
+                 if (cycleInTile === 7) this.incCoarseX();
+             }
+             
+             // Render pixel (Visible lines only, Cycles 1-256)
+             if (isVisibleLine && this.cycle <= 256) {
+                 this.renderPixel(this.cycle - 1, this.scanline);
+             }
+        }
+        
+        // Vertical Increment (Cycle 256)
+        if (this.cycle === 256 && renderingEnabled) {
+            this.incY();
+        }
+        
+        // Reset Coarse X (Cycle 257)
+        if (this.cycle === 257 && renderingEnabled) {
+            this.copyX();
+        }
+        
+        // --- MMC3 IRQ CLOCK (Essential for Kirby/SMB3 screen split) ---
+        // Clock MMC3's IRQ counter at C260 on all relevant lines.
+        if (this.cycle === 260 && renderingEnabled && this.cart.mapper === 4 && this.mapper && this.mapper.scanline) {
+            this.mapper.scanline();
+        }
+
+        // Reset Vertical Y (Pre-render, Cycle 280-304)
+        if (isPreRender && this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) {
+            this.copyY();
         }
       }
       
-      // Visible
-      if (this.scanline >= 0 && this.scanline < 240) {
-        if (this.cycle === 1 && renderingEnabled) this.evalSprites();
-        
-        if (this.cycle >= 1 && this.cycle <= 256) {
-          if (renderingEnabled) {
-            this.bgShiftLo <<= 1;
-            this.bgShiftHi <<= 1;
-            this.bgAttrShiftLo <<= 1;
-            this.bgAttrShiftHi <<= 1;
-          }
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && renderingEnabled) this.reloadShifters();
-          if (cycleInTile === 1 && renderingEnabled) this.bgLatch = this.bgFetch();
-          
-          this.renderPixel(this.cycle - 1, this.scanline);
-          
-          if (cycleInTile === 7 && renderingEnabled) this.incCoarseX();
-        }
-        
-        if (this.cycle === 256 && renderingEnabled) this.incY();
-        if (this.cycle === 257 && renderingEnabled) this.copyX();
-        
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 7) this.incCoarseX();
-        }
-      }
-      
+      // VBlank Start (Scanline 241)
       if (this.scanline === 241 && this.cycle === 1) {
         this.status |= 0x80;
         if (this.ctrl & 0x80) this.nmiDelay = 2; 
         this.ctx.putImageData(this.output, 0, 0);
       }
       
+      // NMI delay logic
       if (this.nmiDelay > 0) {
         this.nmiDelay--;
         if (this.nmiDelay === 0) this.nmi = true;
       }
       
+      // Cycle and Scanline update
       this.cycle++;
       if (this.cycle > 340) {
         this.cycle = 0;
@@ -1398,6 +1404,7 @@ class Mapper90 extends Mapper {
       }
     }
   }
+  
   // NES color palette
   const NTSC_PALETTE = [
     [124,124,124], [0,0,252], [0,0,188], [68,40,188], [148,0,132], [168,0,32], [168,16,0], [136,20,0],
