@@ -299,12 +299,12 @@
     }
   }
  //=== APU - Fixed Implementation ===
-class APU {
+ class APU {
 constructor() {
 this.reg = new Uint8Array(0x18);
 this.frameStep = 0;
 
-```
+
 // CPU cycle counters - these drive all APU timing
 this.cpuCycleCounter = 0;        // Total CPU cycles elapsed
 this.frameCounterCycles = 0;      // Cycles since last frame counter clock
@@ -360,7 +360,7 @@ this.node.connect(this.ac.destination);
 this.frameCounterRate = 7457.5;  // CPU cycles per quarter frame (NTSC)
 this.frameCounterMode = 0;        // 0 = 4-step, 1 = 5-step
 this.irqInhibit = false;          // Bit 6 of $4017
-```
+
 
 }
 
@@ -425,14 +425,14 @@ if (this.tri.length > 0) s |= 4;
 if (this.noise.length > 0) s |= 8;
 if (this.dmc.currentLen > 0) s |= 16;
 
-```
+
   // Status read returns Frame IRQ in bit 6
   if (this.frameIRQ) s |= 0x40;
   this.frameIRQ = false; // Reading clears the flag
   return s;
 }
 return 0;
-```
+
 
 }
 
@@ -440,7 +440,7 @@ write(addr, val) {
 this.reg[addr - 0x4000] = val;
 const ch = (addr >> 2) & 1;
 
-```
+
 switch (addr) {
   case 0x4000: case 0x4004:
     this.pulse[ch].duty = (val >> 6) & 3;
@@ -521,7 +521,7 @@ switch (addr) {
     }
     break;
 }
-```
+
 
 }
 
@@ -562,11 +562,11 @@ this.tri.linearCounter = this.tri.linearCounterReload;
 this.tri.linearCounter–;
 }
 
-```
+
 if (!this.tri.halt) {
   this.tri.linearCounterReloadFlag = false;
 }
-```
+
 
 }
 
@@ -581,7 +581,7 @@ this.stepCycle();
 stepCycle() {
 this.cpuCycleCounter++;
 
-```
+
 // Clock the frame counter
 this.frameCounterCycles++;
 
@@ -603,7 +603,7 @@ if (this.sampleAccumulator >= 1.0) {
   this.sampleAccumulator -= 1.0;
   this.audioBuffer.push(this.generateSample());
 }
-```
+
 
 }
 
@@ -616,7 +616,7 @@ if (this.frameCounterMode === 0) {
 // Step 2: clock everything (length, envelopes, linear)
 // Step 3: clock envelopes, linear counter, set IRQ
 
-```
+
   if (this.frameStep === 1 || this.frameStep === 3) {
     this.clockEnvelopes();
     this.clockLinearCounter();
@@ -657,7 +657,7 @@ if (this.frameCounterMode === 0) {
   
   this.frameStep = (this.frameStep + 1) % 5;
 }
-```
+
 
 }
 
@@ -677,7 +677,7 @@ ch.timerCounter–;
 clockTriangleTimer() {
 const tri = this.tri;
 
-```
+
 // Triangle timer is clocked every CPU cycle
 if (tri.timerCounter === 0) {
   tri.timerCounter = tri.timer;
@@ -688,7 +688,7 @@ if (tri.timerCounter === 0) {
 } else {
   tri.timerCounter--;
 }
-```
+
 
 }
 
@@ -696,7 +696,7 @@ if (tri.timerCounter === 0) {
 clockNoiseTimer() {
 const noise = this.noise;
 
-```
+
 if (noise.timerCounter === 0) {
   noise.timerCounter = noise.timer;
   
@@ -714,7 +714,7 @@ if (noise.timerCounter === 0) {
 } else {
   noise.timerCounter--;
 }
-```
+
 
 }
 
@@ -725,7 +725,7 @@ const p2 = this.getPulseOutput(this.pulse[1]);
 const tri = this.getTriangleOutput();
 const noise = this.getNoiseOutput();
 
-```
+
 // NES non-linear mixer approximation
 // Pulse output: 95.88 / ((8128 / (pulse1 + pulse2)) + 100)
 const pulseOut = (p1 === 0 && p2 === 0) ? 0 : 
@@ -736,7 +736,7 @@ const tndOut = (tri === 0 && noise === 0) ? 0 :
                (159.79 / ((1.0 / (tri/8227.0 + noise/12241.0)) + 100));
 
 return pulseOut + tndOut;
-```
+
 
 }
 
@@ -744,7 +744,7 @@ return pulseOut + tndOut;
 getPulseOutput(ch) {
 if (!ch.enabled || ch.length === 0) return 0;
 
-```
+
 // Silenced if timer value is too low (< 8)
 if (ch.timer < 8) return 0;
 
@@ -754,7 +754,7 @@ if (!dutyOutput) return 0;
 
 // Return volume (constant or envelope)
 return ch.constantVolume ? ch.volume : ch.envelopeVolume;
-```
+
 
 }
 
@@ -762,7 +762,6 @@ return ch.constantVolume ? ch.volume : ch.envelopeVolume;
 getTriangleOutput() {
 if (!this.tri.enabled || this.tri.length === 0) return 0;
 
-```
 // Silenced if linear counter is zero
 if (this.tri.linearCounter === 0) return 0;
 
@@ -770,7 +769,7 @@ if (this.tri.linearCounter === 0) return 0;
 if (this.tri.timer < 2) return 0;
 
 return this.TRIANGLE_SEQUENCE[this.tri.phase];
-```
+
 
 }
 
@@ -778,13 +777,13 @@ return this.TRIANGLE_SEQUENCE[this.tri.phase];
 getNoiseOutput() {
 if (!this.noise.enabled || this.noise.length === 0) return 0;
 
-```
+
 // LFSR bit 0 determines output (0 = silent, 1 = volume)
 if (this.noise.lfsr & 1) return 0;
 
 // Return volume (constant or envelope)
 return this.noise.constantVolume ? this.noise.volume : this.noise.envelopeVolume;
-```
+
 
 }
 
@@ -799,14 +798,14 @@ out[i] = 0; // Underrun - output silence
 }
 }
 
-```
+
 // If buffer is getting too large, skip samples to prevent lag
 // This shouldn't happen if CPU emulation is running at correct speed
 const maxBufferSize = this.sampleRate * 0.1; // 100ms worth of samples
 if (this.audioBuffer.length > maxBufferSize) {
   this.audioBuffer.splice(0, this.audioBuffer.length - maxBufferSize);
 }
-```
+
 
 }
 }
