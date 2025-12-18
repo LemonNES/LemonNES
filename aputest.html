@@ -300,7 +300,7 @@
   }
 //=== APU ===
 //=== APU ===
-class APU {
+ class APU {
   constructor() {
     this.reg = new Uint8Array(0x18);
     this.frameStep = 0;
@@ -441,6 +441,7 @@ class APU {
       out[i] = (p1 + p2) * 0.1; // Simple mixer
     }
   }
+ }
 }
  // ===== Mappers =====
  class Mapper {
