@@ -298,176 +298,517 @@
       }, {passive:false});
     }
   }
- //=== APU ===
- class APU {
-  constructor() {
-    this.reg = new Uint8Array(0x18);
+ //=== APU - Fixed Implementation ===
+class APU {
+constructor() {
+this.reg = new Uint8Array(0x18);
+this.frameStep = 0;
+
+```
+// CPU cycle counters - these drive all APU timing
+this.cpuCycleCounter = 0;        // Total CPU cycles elapsed
+this.frameCounterCycles = 0;      // Cycles since last frame counter clock
+
+this.frameIRQ = false;
+this.sampleRate = 44100;
+
+// Standard NES Length Counter Lookup Table
+this.LENGTH_TABLE = [
+  10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
+  12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+];
+
+// NES duty cycle waveforms (8 steps each)
+this.DUTY_CYCLES = [
+  [0,1,0,0,0,0,0,0], // 12.5%
+  [0,1,1,0,0,0,0,0], // 25%
+  [0,1,1,1,1,0,0,0], // 50%
+  [1,0,0,1,1,1,1,1]  // 25% negated
+];
+
+// Triangle waveform (32 steps)
+this.TRIANGLE_SEQUENCE = [
+  15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,  0,
+   0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15
+];
+
+// NTSC noise period lookup table
+this.NOISE_PERIODS = [
+  4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+];
+
+this.pulse = [this.mkPulse(), this.mkPulse()];
+this.tri = this.mkTriangle();
+this.noise = this.mkNoise();
+this.dmc = this.mkDMC();
+
+const AC = window.AudioContext || window.webkitAudioContext;
+this.ac = new AC();
+this.bufferSize = 2048;
+
+// Audio output buffer - decoupled from CPU timing
+this.audioBuffer = [];
+this.samplesPerCpuCycle = this.sampleRate / 1789773; // NTSC CPU clock
+this.sampleAccumulator = 0;
+
+this.node = this.ac.createScriptProcessor(this.bufferSize, 0, 1);
+this.node.onaudioprocess = (e) => this.pullSamples(e.outputBuffer.getChannelData(0));
+this.node.connect(this.ac.destination);
+
+// Frame counter timing - NTSC uses ~240 Hz (CPU clock / 7457.5)
+// We track fractional cycles for accuracy
+this.frameCounterRate = 7457.5;  // CPU cycles per quarter frame (NTSC)
+this.frameCounterMode = 0;        // 0 = 4-step, 1 = 5-step
+this.irqInhibit = false;          // Bit 6 of $4017
+```
+
+}
+
+mkPulse() {
+return {
+timer: 0,           // 11-bit timer reload value
+timerCounter: 0,    // Current timer countdown
+phase: 0,           // Current position in duty cycle (0-7)
+duty: 0,            // Duty cycle selector (0-3)
+volume: 0,          // Volume/envelope value
+enabled: false,     // Channel enabled via $4015
+length: 0,          // Length counter value
+halt: false,        // Length counter halt flag
+envelopeStart: false,
+envelopeCounter: 0,
+envelopeVolume: 15,
+constantVolume: false
+};
+}
+
+mkTriangle() {
+return {
+timer: 0,
+timerCounter: 0,
+phase: 0,           // Current position in triangle wave (0-31)
+enabled: false,
+length: 0,
+halt: false,
+linearCounter: 0,
+linearCounterReload: 0,
+linearCounterReloadFlag: false
+};
+}
+
+mkNoise() {
+return {
+timer: 0,
+timerCounter: 0,
+lfsr: 1,            // 15-bit Linear Feedback Shift Register
+volume: 0,
+enabled: false,
+length: 0,
+halt: false,
+mode: 0,            // 0 = mode 0, 1 = mode 1 (short mode)
+envelopeStart: false,
+envelopeCounter: 0,
+envelopeVolume: 15,
+constantVolume: false
+};
+}
+
+mkDMC() {
+return { enabled: false, currentLen: 0, output: 0 };
+}
+
+read(addr) {
+if (addr === 0x4015) {
+let s = 0;
+if (this.pulse[0].length > 0) s |= 1;
+if (this.pulse[1].length > 0) s |= 2;
+if (this.tri.length > 0) s |= 4;
+if (this.noise.length > 0) s |= 8;
+if (this.dmc.currentLen > 0) s |= 16;
+
+```
+  // Status read returns Frame IRQ in bit 6
+  if (this.frameIRQ) s |= 0x40;
+  this.frameIRQ = false; // Reading clears the flag
+  return s;
+}
+return 0;
+```
+
+}
+
+write(addr, val) {
+this.reg[addr - 0x4000] = val;
+const ch = (addr >> 2) & 1;
+
+```
+switch (addr) {
+  case 0x4000: case 0x4004:
+    this.pulse[ch].duty = (val >> 6) & 3;
+    this.pulse[ch].halt = !!(val & 0x20);
+    this.pulse[ch].constantVolume = !!(val & 0x10);
+    this.pulse[ch].volume = val & 0x0F;
+    break;
+
+  case 0x4002: case 0x4006:
+    this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val;
+    break;
+
+  case 0x4003: case 0x4007:
+    this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) << 8);
+    if (this.pulse[ch].enabled) {
+      this.pulse[ch].length = this.LENGTH_TABLE[val >> 3];
+    }
+    this.pulse[ch].phase = 0;
+    this.pulse[ch].envelopeStart = true;
+    break;
+
+  case 0x4008:
+    this.tri.halt = !!(val & 0x80);
+    this.tri.linearCounterReload = val & 0x7F;
+    break;
+
+  case 0x400A:
+    this.tri.timer = (this.tri.timer & 0x700) | val;
+    break;
+
+  case 0x400B:
+    this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) << 8);
+    if (this.tri.enabled) this.tri.length = this.LENGTH_TABLE[val >> 3];
+    this.tri.linearCounterReloadFlag = true;
+    break;
+
+  case 0x400C: // Noise
+    this.noise.halt = !!(val & 0x20);
+    this.noise.constantVolume = !!(val & 0x10);
+    this.noise.volume = val & 0x0F;
+    break;
+
+  case 0x400E: // Noise Period
+    this.noise.mode = (val >> 7) & 1;
+    this.noise.timer = this.NOISE_PERIODS[val & 0x0F];
+    break;
+
+  case 0x400F: // Noise Length Counter Load
+    if (this.noise.enabled) {
+      this.noise.length = this.LENGTH_TABLE[val >> 3];
+    }
+    this.noise.envelopeStart = true;
+    break;
+
+  case 0x4015:
+    this.pulse[0].enabled = !!(val & 1);
+    this.pulse[1].enabled = !!(val & 2);
+    this.tri.enabled = !!(val & 4);
+    this.noise.enabled = !!(val & 8);
+    // Disabling a channel clears its length counter immediately
+    if (!this.pulse[0].enabled) this.pulse[0].length = 0;
+    if (!this.pulse[1].enabled) this.pulse[1].length = 0;
+    if (!this.tri.enabled) this.tri.length = 0;
+    if (!this.noise.enabled) this.noise.length = 0;
+    break;
+
+  case 0x4017:
+    this.frameCounterMode = (val >> 7) & 1;
+    this.irqInhibit = !!(val & 0x40);
     this.frameStep = 0;
-    this.divider = 0;
-    this.cycles = 0;
-    this.frameIRQ = false;
-    this.sampleRate = 44100;
-
-    // Standard NES Length Counter Lookup Table
-    this.LENGTH_TABLE = [
-      10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-      12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
-    ];
-
-    this.pulse = [this.mkPulse(), this.mkPulse()];
-    this.tri = this.mkTriangle();
-    this.noise = this.mkNoise();
-    this.dmc = this.mkDMC();
-
-    const AC = window.AudioContext || window.webkitAudioContext;
-    this.ac = new AC();
-    this.bufferSize = 2048;
-    this.node = this.ac.createScriptProcessor(this.bufferSize, 0, 1);
-    this.node.onaudioprocess = (e) => this.pullSamples(e.outputBuffer.getChannelData(0));
-    this.node.connect(this.ac.destination);
-
-    this.frameCounterRate = 7457; // NTSC: CPU cycles per APU step
-    this.frameCounterMode = 0;    // 0 = 4-step, 1 = 5-step
-    this.irqInhibit = false;      // Bit 6 of $4017
-  }
-
-  mkPulse() {
-    return { timer: 0, phase: 0, duty: 0, volume: 0, enabled: false, length: 0, halt: false };
-  }
-  mkTriangle() {
-    return { timer: 0, phase: 0, enabled: false, length: 0, halt: false };
-  }
-  mkNoise() {
-    return { timer: 0, lfsr: 1, volume: 0, enabled: false, length: 0, halt: false, mode: 0 };
-  }
-  mkDMC() {
-    return { enabled: false, currentLen: 0, output: 0 };
-  }
-
-  read(addr) {
-    if (addr === 0x4015) {
-      let s = 0;
-      if (this.pulse[0].length > 0) s |= 1;
-      if (this.pulse[1].length > 0) s |= 2;
-      if (this.tri.length > 0) s |= 4;
-      if (this.noise.length > 0) s |= 8;
-      if (this.dmc.currentLen > 0) s |= 16;
-      
-      // Status read returns Frame IRQ in bit 6
-      if (this.frameIRQ) s |= 0x40;
-      this.frameIRQ = false; // Reading clears the flag
-      return s;
+    this.frameCounterCycles = 0;
+    if (this.irqInhibit) this.frameIRQ = false;
+    // In 5-step mode, clock units immediately
+    if (this.frameCounterMode === 1) {
+      this.clockLengthCounters();
+      this.clockEnvelopes();
+      this.clockLinearCounter();
     }
-    return 0;
+    break;
+}
+```
+
+}
+
+// Clock length counters for all channels
+clockLengthCounters() {
+[this.pulse[0], this.pulse[1], this.tri, this.noise].forEach(ch => {
+if (ch.length > 0 && !ch.halt) ch.length–;
+});
+}
+
+// Clock envelope generators for pulse and noise channels
+clockEnvelopes() {
+[this.pulse[0], this.pulse[1], this.noise].forEach(ch => {
+if (ch.envelopeStart) {
+ch.envelopeStart = false;
+ch.envelopeVolume = 15;
+ch.envelopeCounter = ch.volume;
+} else {
+if (ch.envelopeCounter > 0) {
+ch.envelopeCounter–;
+} else {
+ch.envelopeCounter = ch.volume;
+if (ch.envelopeVolume > 0) {
+ch.envelopeVolume–;
+} else if (ch.halt) {
+ch.envelopeVolume = 15;
+}
+}
+}
+});
+}
+
+// Clock triangle’s linear counter
+clockLinearCounter() {
+if (this.tri.linearCounterReloadFlag) {
+this.tri.linearCounter = this.tri.linearCounterReload;
+} else if (this.tri.linearCounter > 0) {
+this.tri.linearCounter–;
+}
+
+```
+if (!this.tri.halt) {
+  this.tri.linearCounterReloadFlag = false;
+}
+```
+
+}
+
+// Main CPU cycle step - called by emulator for each CPU cycle
+step(cycles) {
+for (let i = 0; i < cycles; i++) {
+this.stepCycle();
+}
+}
+
+// Step a single CPU cycle
+stepCycle() {
+this.cpuCycleCounter++;
+
+```
+// Clock the frame counter
+this.frameCounterCycles++;
+
+// Frame counter timing: ~240 Hz = CPU clock / 7457.5
+// We use a fractional rate for accuracy
+if (this.frameCounterCycles >= this.frameCounterRate) {
+  this.frameCounterCycles -= this.frameCounterRate;
+  this.clockFrameCounter();
+}
+
+// Clock each channel's timer on every CPU cycle
+this.clockPulseTimers();
+this.clockTriangleTimer();
+this.clockNoiseTimer();
+
+// Generate audio sample when enough CPU cycles have elapsed
+this.sampleAccumulator += this.samplesPerCpuCycle;
+if (this.sampleAccumulator >= 1.0) {
+  this.sampleAccumulator -= 1.0;
+  this.audioBuffer.push(this.generateSample());
+}
+```
+
+}
+
+// Frame counter sequencer - 4-step or 5-step mode
+clockFrameCounter() {
+if (this.frameCounterMode === 0) {
+// 4-step sequence: cycles at 7457.5, 14915, 22372.5, 29830
+// Step 0: nothing
+// Step 1: clock envelopes, linear counter
+// Step 2: clock everything (length, envelopes, linear)
+// Step 3: clock envelopes, linear counter, set IRQ
+
+```
+  if (this.frameStep === 1 || this.frameStep === 3) {
+    this.clockEnvelopes();
+    this.clockLinearCounter();
   }
-
-  write(addr, val) {
-    this.reg[addr - 0x4000] = val;
-    const ch = (addr >> 2) & 1;
-
-    switch (addr) {
-      case 0x4000: case 0x4004:
-        this.pulse[ch].duty = (val >> 6) & 3;
-        this.pulse[ch].halt = !!(val & 0x20);
-        this.pulse[ch].volume = val & 0x0F;
-        break;
-      case 0x4002: case 0x4006:
-        this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val;
-        break;
-      case 0x4003: case 0x4007:
-        this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) << 8);
-        if (this.pulse[ch].enabled) {
-          this.pulse[ch].length = this.LENGTH_TABLE[val >> 3];
-        }
-        this.pulse[ch].phase = 0;
-        break;
-      case 0x4008:
-        this.tri.halt = !!(val & 0x80);
-        break;
-      case 0x400B:
-        this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) << 8);
-        if (this.tri.enabled) this.tri.length = this.LENGTH_TABLE[val >> 3];
-        break;
-      case 0x400C: // Noise Halt and Volume
-        this.noise.halt = !!(val & 0x20);
-        this.noise.volume = val & 0x0F;
-        break;
-      case 0x400E: // Noise Period
-        this.noise.mode = (val >> 7) & 1;
-        this.noise.timer = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068][val & 0x0F];
-        break;
-      case 0x400F: // Noise Length Counter Load
-        if (this.noise.enabled) {
-          this.noise.length = this.LENGTH_TABLE[val >> 3];
-        }
-        break;
-      case 0x4015:
-        this.pulse[0].enabled = !!(val & 1);
-        this.pulse[1].enabled = !!(val & 2);
-        this.tri.enabled = !!(val & 4);
-        this.noise.enabled = !!(val & 8);
-        // Disabling a channel clears its length counter immediately
-        if (!this.pulse[0].enabled) this.pulse[0].length = 0;
-        if (!this.pulse[1].enabled) this.pulse[1].length = 0;
-        if (!this.tri.enabled) this.tri.length = 0;
-        if (!this.noise.enabled) this.noise.length = 0;
-        break;
-      case 0x4017:
-        this.frameCounterMode = (val >> 7) & 1;
-        this.irqInhibit = !!(val & 0x40);
-        this.frameStep = 0;
-        this.divider = 0;
-        if (this.irqInhibit) this.frameIRQ = false;
-        // In 5-step mode, clock units immediately
-        if (this.frameCounterMode === 1) this.clockLengthCounters();
-        break;
-    }
+  
+  if (this.frameStep === 1) {
+    this.clockLengthCounters();
   }
-
-  clockLengthCounters() {
-    [this.pulse[0], this.pulse[1], this.tri, this.noise].forEach(ch => {
-      if (ch.length > 0 && !ch.halt) ch.length--;
-    });
-  }
-
-  step(cycles) {
-    this.divider += cycles;
-    if (this.divider >= this.frameCounterRate) {
-      this.divider -= this.frameCounterRate;
-
-      if (this.frameCounterMode === 0) {
-        // 4-step sequence
-        this.frameStep = (this.frameStep + 1) % 4;
-        if (this.frameStep === 1 || this.frameStep === 3) this.clockLengthCounters();
-        // Set IRQ flag on last step if not inhibited
-        if (this.frameStep === 3 && !this.irqInhibit) this.frameIRQ = true;
-      } else {
-        // 5-step sequence
-        this.frameStep = (this.frameStep + 1) % 5;
-        if (this.frameStep === 0 || this.frameStep === 2) this.clockLengthCounters();
-      }
+  
+  if (this.frameStep === 3) {
+    this.clockLengthCounters();
+    // Set IRQ flag on step 3 if not inhibited
+    if (!this.irqInhibit) {
+      this.frameIRQ = true;
     }
   }
-
-  pullSamples(out) {
-    const len = out.length;
-    for (let i = 0; i < len; i++) {
-      const sq = (ch) => {
-        if (!ch.enabled || ch.length === 0 || ch.timer < 8) return 0;
-        const duties = [
-          [0,1,0,0,0,0,0,0], [0,1,1,0,0,0,0,0], 
-          [0,1,1,1,1,0,0,0], [1,0,0,1,1,1,1,1]
-        ];
-        const period = (ch.timer + 1) * 2;
-        const phase = Math.floor((this.cycles++ / period) % 8);
-        return duties[ch.duty][phase] ? (ch.volume / 15) : 0;
-      };
-      
-      const p1 = sq(this.pulse[0]);
-      const p2 = sq(this.pulse[1]);
-      out[i] = (p1 + p2) * 0.1; 
-    }
+  
+  this.frameStep = (this.frameStep + 1) % 4;
+  
+} else {
+  // 5-step sequence: no IRQ, different timing
+  // Step 0: clock envelopes, linear counter
+  // Step 1: clock everything
+  // Step 2: clock envelopes, linear counter
+  // Step 3: nothing
+  // Step 4: clock everything
+  
+  if (this.frameStep === 0 || this.frameStep === 2) {
+    this.clockEnvelopes();
+    this.clockLinearCounter();
   }
+  
+  if (this.frameStep === 1 || this.frameStep === 4) {
+    this.clockLengthCounters();
+    this.clockEnvelopes();
+    this.clockLinearCounter();
+  }
+  
+  this.frameStep = (this.frameStep + 1) % 5;
+}
+```
+
+}
+
+// Clock pulse channel timers (called every CPU cycle)
+clockPulseTimers() {
+this.pulse.forEach(ch => {
+if (ch.timerCounter === 0) {
+ch.timerCounter = ch.timer;
+ch.phase = (ch.phase + 1) % 8;
+} else {
+ch.timerCounter–;
+}
+});
+}
+
+// Clock triangle timer (runs at 2x CPU frequency, but we simulate it)
+clockTriangleTimer() {
+const tri = this.tri;
+
+```
+// Triangle timer is clocked every CPU cycle
+if (tri.timerCounter === 0) {
+  tri.timerCounter = tri.timer;
+  // Only advance if length counter and linear counter are non-zero
+  if (tri.length > 0 && tri.linearCounter > 0) {
+    tri.phase = (tri.phase + 1) % 32;
+  }
+} else {
+  tri.timerCounter--;
+}
+```
+
+}
+
+// Clock noise timer
+clockNoiseTimer() {
+const noise = this.noise;
+
+```
+if (noise.timerCounter === 0) {
+  noise.timerCounter = noise.timer;
+  
+  // Clock the LFSR
+  let feedback;
+  if (noise.mode === 1) {
+    // Mode 1: bits 0 and 6 (short mode)
+    feedback = (noise.lfsr & 1) ^ ((noise.lfsr >> 6) & 1);
+  } else {
+    // Mode 0: bits 0 and 1
+    feedback = (noise.lfsr & 1) ^ ((noise.lfsr >> 1) & 1);
+  }
+  
+  noise.lfsr = (noise.lfsr >> 1) | (feedback << 14);
+} else {
+  noise.timerCounter--;
+}
+```
+
+}
+
+// Generate a single audio sample from all channels
+generateSample() {
+const p1 = this.getPulseOutput(this.pulse[0]);
+const p2 = this.getPulseOutput(this.pulse[1]);
+const tri = this.getTriangleOutput();
+const noise = this.getNoiseOutput();
+
+```
+// NES non-linear mixer approximation
+// Pulse output: 95.88 / ((8128 / (pulse1 + pulse2)) + 100)
+const pulseOut = (p1 === 0 && p2 === 0) ? 0 : 
+                 (95.88 / ((8128.0 / (p1 + p2)) + 100));
+
+// TND output: 159.79 / ((1 / (tri/8227 + noise/12241 + dmc/22638)) + 100)
+const tndOut = (tri === 0 && noise === 0) ? 0 :
+               (159.79 / ((1.0 / (tri/8227.0 + noise/12241.0)) + 100));
+
+return pulseOut + tndOut;
+```
+
+}
+
+// Get pulse channel output (0-15)
+getPulseOutput(ch) {
+if (!ch.enabled || ch.length === 0) return 0;
+
+```
+// Silenced if timer value is too low (< 8)
+if (ch.timer < 8) return 0;
+
+// Check if current phase produces output
+const dutyOutput = this.DUTY_CYCLES[ch.duty][ch.phase];
+if (!dutyOutput) return 0;
+
+// Return volume (constant or envelope)
+return ch.constantVolume ? ch.volume : ch.envelopeVolume;
+```
+
+}
+
+// Get triangle channel output (0-15)
+getTriangleOutput() {
+if (!this.tri.enabled || this.tri.length === 0) return 0;
+
+```
+// Silenced if linear counter is zero
+if (this.tri.linearCounter === 0) return 0;
+
+// Ultrasonic frequencies are silenced (timer < 2)
+if (this.tri.timer < 2) return 0;
+
+return this.TRIANGLE_SEQUENCE[this.tri.phase];
+```
+
+}
+
+// Get noise channel output (0-15)
+getNoiseOutput() {
+if (!this.noise.enabled || this.noise.length === 0) return 0;
+
+```
+// LFSR bit 0 determines output (0 = silent, 1 = volume)
+if (this.noise.lfsr & 1) return 0;
+
+// Return volume (constant or envelope)
+return this.noise.constantVolume ? this.noise.volume : this.noise.envelopeVolume;
+```
+
+}
+
+// Pull samples from buffer to audio callback
+pullSamples(out) {
+const len = out.length;
+for (let i = 0; i < len; i++) {
+if (this.audioBuffer.length > 0) {
+out[i] = this.audioBuffer.shift();
+} else {
+out[i] = 0; // Underrun - output silence
+}
+}
+
+```
+// If buffer is getting too large, skip samples to prevent lag
+// This shouldn't happen if CPU emulation is running at correct speed
+const maxBufferSize = this.sampleRate * 0.1; // 100ms worth of samples
+if (this.audioBuffer.length > maxBufferSize) {
+  this.audioBuffer.splice(0, this.audioBuffer.length - maxBufferSize);
+}
+```
+
+}
 }
  // ===== Mappers =====
  class Mapper {
