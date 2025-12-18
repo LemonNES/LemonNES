@@ -299,7 +299,6 @@
     }
   }
 //=== APU ===
- //=== APU ===
 class APU {
   constructor() {
     this.reg = new Uint8Array(0x18);
@@ -309,7 +308,7 @@ class APU {
     this.frameIRQ = false;
     this.sampleRate = 44100;
 
-    [span_0](start_span)[span_1](start_span)// Standard NES Length Counter Lookup Table[span_0](end_span)[span_1](end_span)
+    // Standard NES Length Counter Lookup Table
     this.LENGTH_TABLE = [
       10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
       12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
@@ -320,18 +319,15 @@ class APU {
     this.noise = this.mkNoise();
     this.dmc = this.mkDMC();
 
-    [span_2](start_span)// Audio Context Setup[span_2](end_span)
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ac = new AC();
     this.bufferSize = 2048;
     this.node = this.ac.createScriptProcessor(this.bufferSize, 0, 1);
     this.node.onaudioprocess = (e) => this.pullSamples(e.outputBuffer.getChannelData(0));
-    this.gain = this.ac.createGain();
-    this.gain.gain.value = 0.15; // Set reasonable master volume
-    this.node.connect(this.gain).connect(this.ac.destination);
+    this.node.connect(this.ac.destination);
 
-    this.frameCounterRate = 7457; [span_3](start_span)// NTSC CPU cycles per APU step[span_3](end_span)
-    this.frameCounterMode = 0;    [span_4](start_span)[span_5](start_span)// 0 = 4-step, 1 = 5-step[span_4](end_span)[span_5](end_span)
+    this.frameCounterRate = 7457; // CPU cycles per APU step
+    this.frameCounterMode = 0;    // 0 = 4-step, 1 = 5-step
     this.irqInhibit = false;      // Bit 6 of $4017
   }
 
@@ -357,8 +353,10 @@ class APU {
       if (this.noise.length > 0) s |= 8;
       if (this.dmc.currentLen > 0) s |= 16;
       
-      [span_6](start_span)// Return Frame IRQ flag in bit 6, then clear it[span_6](end_span)
+      // TEST 3 FIX: Return Frame IRQ flag in bit 6
       if (this.frameIRQ) s |= 0x40;
+      
+      // Reading $4015 clears the frame IRQ flag
       this.frameIRQ = false; 
       return s;
     }
@@ -372,52 +370,53 @@ class APU {
     switch (addr) {
       case 0x4000: case 0x4004:
         this.pulse[ch].duty = (val >> 6) & 3;
-        this.pulse[ch].halt = !!(val & 0x20); [span_7](start_span)// Length halt / envelope loop[span_7](end_span)
+        this.pulse[ch].halt = !!(val & 0x20);
         this.pulse[ch].volume = val & 0x0F;
         break;
-      case 0x4002: case 0x4006:
-        [span_8](start_span)this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val;[span_8](end_span)
+      case 0x4002: case 0x4006: // Timer Low
+        this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val;
         break;
-      case 0x4003: case 0x4007:
-        this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) [span_9](start_span)<< 8);[span_9](end_span)
+      case 0x4003: case 0x4007: // Timer High & Length Counter Load
+        this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) << 8);
         if (this.pulse[ch].enabled) {
-          this.pulse[ch].length = this.LENGTH_TABLE[val >> 3]; // Load standard length
+          this.pulse[ch].length = this.LENGTH_TABLE[val >> 3];
         }
-        this.pulse[ch].phase = 0;
+        this.pulse[ch].phase = 0; // Reset duty sequencer
         break;
       case 0x4008:
-        this.tri.halt = !!(val & 0x80); // Control bit acts as length halt
+        this.tri.halt = !!(val & 0x80);
         break;
       case 0x400B:
+        this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) << 8);
         if (this.tri.enabled) this.tri.length = this.LENGTH_TABLE[val >> 3];
-        this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) [span_10](start_span)<< 8);[span_10](end_span)
         break;
       case 0x400F:
         if (this.noise.enabled) this.noise.length = this.LENGTH_TABLE[val >> 3];
         break;
-      [span_11](start_span)case 0x4015: // Status / Enable[span_11](end_span)
+      case 0x4015:
         this.pulse[0].enabled = !!(val & 1);
         this.pulse[1].enabled = !!(val & 2);
         this.tri.enabled = !!(val & 4);
         this.noise.enabled = !!(val & 8);
-        // Disabling a channel clears length counter immediately
+        // Immediate length clear on disable
         if (!this.pulse[0].enabled) this.pulse[0].length = 0;
         if (!this.pulse[1].enabled) this.pulse[1].length = 0;
         if (!this.tri.enabled) this.tri.length = 0;
         if (!this.noise.enabled) this.noise.length = 0;
         break;
-      [span_12](start_span)case 0x4017: // Frame Counter Mode[span_12](end_span)
+      case 0x4017:
         this.frameCounterMode = (val >> 7) & 1;
         this.irqInhibit = !!(val & 0x40);
         this.frameStep = 0;
         this.divider = 0;
         if (this.irqInhibit) this.frameIRQ = false;
-        if (this.frameCounterMode === 1) this.clockLengthCounters();
+        // 5-step mode clocks units immediately
+        if (this.frameCounterMode === 1) this.clockLengthAndSweep();
         break;
     }
   }
 
-  clockLengthCounters() {
+  clockLengthAndSweep() {
     [this.pulse[0], this.pulse[1], this.tri, this.noise].forEach(ch => {
       if (ch.length > 0 && !ch.halt) ch.length--;
     });
@@ -429,15 +428,21 @@ class APU {
       this.divider -= this.frameCounterRate;
 
       if (this.frameCounterMode === 0) {
-        [span_13](start_span)// 4-step sequence[span_13](end_span)
+        // 4-step sequence
         this.frameStep = (this.frameStep + 1) % 4;
-        if (this.frameStep === 1 || this.frameStep === 3) this.clockLengthCounters();
+        if (this.frameStep === 1 || this.frameStep === 3) {
+          this.clockLengthAndSweep();
+        }
         // Set IRQ flag on step 3 if not inhibited
-        if (this.frameStep === 3 && !this.irqInhibit) this.frameIRQ = true;
+        if (this.frameStep === 3 && !this.irqInhibit) {
+          this.frameIRQ = true;
+        }
       } else {
         // 5-step sequence
         this.frameStep = (this.frameStep + 1) % 5;
-        if (this.frameStep === 0 || this.frameStep === 2) this.clockLengthCounters();
+        if (this.frameStep === 0 || this.frameStep === 2) {
+          this.clockLengthAndSweep();
+        }
       }
     }
   }
@@ -446,22 +451,25 @@ class APU {
     const len = out.length;
     for (let i = 0; i < len; i++) {
       const sq = (ch) => {
-        [span_14](start_span)if (!ch.enabled || ch.length === 0 || ch.timer < 8) return 0;[span_14](end_span)
-        const dutyCycle = [0.125, 0.25, 0.5, 0.75][ch.duty];
+        if (!ch.enabled || ch.length === 0 || ch.timer < 8) return 0;
+        const duties = [
+          [0,1,0,0,0,0,0,0], // 12.5%
+          [0,1,1,0,0,0,0,0], // 25%
+          [0,1,1,1,1,0,0,0], // 50%
+          [1,0,0,1,1,1,1,1]  // 25% negated
+        ];
         const period = (ch.timer + 1) * 2;
-        const phase = (this.cycles++ / period) % 1.0;
-        return (phase < dutyCycle) ? (ch.volume / 15) : 0;
+        const phase = Math.floor((this.cycles++ / period) % 8);
+        return duties[ch.duty][phase] ? (ch.volume / 15) : 0;
       };
-
-      [span_15](start_span)const p1 = sq(this.pulse[0]);[span_15](end_span)
-      const p2 = sq(this.pulse[1]);
       
-      [span_16](start_span)// Simple Pulse Mixer[span_16](end_span)
-      const pulseOut = (p1 + p2) > 0 ? 95.88 / (8128 / (p1 + p2) + 100) : 0;
-      out[i] = pulseOut;
+      const p1 = sq(this.pulse[0]);
+      const p2 = sq(this.pulse[1]);
+      // Normalized output
+      out[i] = (p1 + p2) * 0.1;
     }
   }
-}
+} 
  // ===== Mappers =====
  class Mapper {
     constructor(cart){ this.cart=cart; }
