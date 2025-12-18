@@ -1269,14 +1269,26 @@
       if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
       
       const renderingEnabled = (this.mask & 0x18) !== 0;
-      
-      if (this.scanline === 261 && this.cycle === 339 && renderingEnabled && this.oddFrame) {
-        this.cycle = 0;
-        this.scanline = 0;
-        this.frame++;
-        this.oddFrame = false;
-        return;
+
+    // --- PPU REGISTERS UPDATE TIMING [FIX] ---
+    if (renderingEnabled) {
+      // Horizontal Scroll Bits (copyX)
+      // Occurs at dot 257 of every visible scanline and the pre-render line
+      if (this.cycle === 257) {
+        if (this.scanline < 240 || this.scanline === 261) {
+          // v: ....F.. ...XXXXX = t: ....F.. ...XXXXX
+          this.v = (this.v & 0x7BE0) | (this.t & 0x041F);
+        }
       }
+      // Vertical Scroll Bits (copyY)
+      // Occurs during the pre-render scanline (261) between cycles 280 and 304
+      if (this.scanline === 261 && this.cycle >= 280 && this.cycle <= 304) {
+        // v: .HIJKL. YY...RRR = t: .HIJKL. YY...RRR
+        this.v = (this.v & 0x041F) | (this.t & 0x7BE0);
+      }
+    }
+
+ 
       
       // Pre-render
       if (this.scanline === 261) {
@@ -1343,7 +1355,12 @@
         this.nmiDelay--;
         if (this.nmiDelay === 0) this.nmi = true;
       }
-      
+  
+    // Ensure Mapper IRQ clocking remains at HBlank (cycle 260)
+    if (this.mapper && this.mapper.ppuCycle) {
+        this.mapper.ppuCycle();
+    }
+  }
       this.cycle++;
       if (this.cycle > 340) {
         this.cycle = 0;
