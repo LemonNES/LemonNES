@@ -20,8 +20,6 @@ LemonNES Is A Simple, Lightweight NES Emulator Coded In HTML, CSS, And JavaScrip
 # Compatibility
 The Following Games Have Been Tested With LemonNES
 
-• Super Mario Bros - Runs Great With Exeremely Minor Graphical Issues
-
 • Balloon Fight - Runs Great
 
 • Excitebike - Runs Great
@@ -32,9 +30,11 @@ The Following Games Have Been Tested With LemonNES
 
 • Kirby's Adventure - Runs Great With HUD Rendering Issues
 
-• Super Mario Bros 2 - Runs Great With Extreme Smearing
+• Super Mario Bros - Runs Great With Exeremely Minor Graphical Issues
 
-• Super Mario Bros 3 - Runs Great With HUD Rendering Issues
+• Super Mario Bros 2 - Runs Great With Extreme Smearing And Sprite Ghosting.
+
+• Super Mario Bros 3 - Runs Great
 
 # Beta
 LemonNES Is Currently In Beta, If You Find Any Issues With The Code, Please Report Them By Creating A Pull Request.
