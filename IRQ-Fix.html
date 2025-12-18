@@ -1282,93 +1282,74 @@
       img[idx + 3] = 255;
     }
     
-    step() {
-      if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
-      
-      const renderingEnabled = (this.mask & 0x18) !== 0;
-      
-      if (this.scanline === 261 && this.cycle === 339 && renderingEnabled && this.oddFrame) {
-        this.cycle = 0;
-        this.scanline = 0;
-        this.frame++;
-        this.oddFrame = false;
-        return;
+        step() {
+      // PATCH START: Fixing VBlank/Timing/Scrolling for bottom-screen corruption
+
+      // Correct VBlank Clear (Scanline 261, Cycle 1) and Sprite0Hit clear
+      // This is the beginning of the pre-render scanline (261)
+      if (this.scanline === 261 && this.cycle === 1) {
+        this.status &= 0x7F; // Clear VBlank (bit 7)
+        this.sprite0Hit = false; // Clear Sprite 0 Hit (bit 6)
       }
-      
-      // Pre-render
-      if (this.scanline === 261) {
-        if (this.cycle === 1) this.status &= ~(0x80 | 0x40 | 0x20);
-        if (this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) this.copyY();
-        
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 7) this.incCoarseX();
-        }
-      }
-      
-      // Visible
-      if (this.scanline >= 0 && this.scanline < 240) {
-        if (this.cycle === 1 && renderingEnabled) this.evalSprites();
-        
-        if (this.cycle >= 1 && this.cycle <= 256) {
-          if (renderingEnabled) {
-            this.bgShiftLo <<= 1;
-            this.bgShiftHi <<= 1;
-            this.bgAttrShiftLo <<= 1;
-            this.bgAttrShiftHi <<= 1;
-          }
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && renderingEnabled) this.reloadShifters();
-          if (cycleInTile === 1 && renderingEnabled) this.bgLatch = this.bgFetch();
-          
-          this.renderPixel(this.cycle - 1, this.scanline);
-          
-          if (cycleInTile === 7 && renderingEnabled) this.incCoarseX();
-        }
-        
-        if (this.cycle === 256 && renderingEnabled) this.incY();
-        if (this.cycle === 257 && renderingEnabled) this.copyX();
-        
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 7) this.incCoarseX();
-        }
-      }
-      
+
+      // Correct VBlank Set and NMI (Scanline 241, Cycle 1)
+      // This is the beginning of the VBlank period
       if (this.scanline === 241 && this.cycle === 1) {
-        this.status |= 0x80;
-        if (this.ctrl & 0x80) this.nmiDelay = 2; 
-        this.ctx.putImageData(this.output, 0, 0);
+        this.status |= 0x80; // Set VBlank (bit 7)
+        // Trigger NMI if enabled (CONTROL reg bit 7)
+        if (this.control & 0x80) this.cpu.nmi();
       }
       
-      if (this.nmiDelay > 0) {
-        this.nmiDelay--;
-        if (this.nmiDelay === 0) this.nmi = true;
+      // Background and sprite rendering (Scanlines 0-239)
+      if (this.scanline >= 0 && this.scanline < 240) {
+        if ((this.mask & 0x18) !== 0) { // If rendering enabled
+          this.renderPixel(this.scanline, this.cycle);
+          this.tickRender();
+
+          // V-increment at cycle 257
+          if (this.cycle === 257) {
+            this.v = (this.v & 0xFBE0) | (this.t & 0x041F); // Copy H (coarse X, nametable H)
+            this.v += 0x1000; // Increment Y scroll
+            if ((this.v & 0x73A0) === 0x7000) this.v = (this.v & 0x0FFF) ^ 0x0800; // Wrap Y scroll
+          }
+
+          // H-copy at cycle 320
+          if (this.cycle === 320) {
+            this.v = (this.v & 0xFBE0) | (this.t & 0x041F); // Copy H (coarse X, nametable H)
+          }
+        }
       }
-      
+
+      // Pre-render line (261) updates
+      if (this.scanline === 261) {
+        if ((this.mask & 0x18) !== 0) { // If rendering enabled
+          this.tickRender();
+          
+          // H-copy at cycle 257
+          if (this.cycle === 257) {
+            this.v = (this.v & 0xFBE0) | (this.t & 0x041F); // Copy H (coarse X, nametable H)
+          }
+
+          // V-copy at cycles 280-304
+          if (this.cycle >= 280 && this.cycle <= 304) {
+            this.v = (this.v & 0xF800) | (this.t & 0x07FF); // Copy Y portion from t to v
+          }
+        }
+      }
+
+      // The cycle/scanline advancement logic
       this.cycle++;
       if (this.cycle > 340) {
         this.cycle = 0;
         this.scanline++;
-        if (this.scanline > 261) {
+        
+        // Frame increment when entering scanline 241
+        if (this.scanline === 241) {
+            this.frame++;
+        }
+        
+        if (this.scanline === 262) { // Wrap from pre-render line (261) to scanline 0
           this.scanline = 0;
-          this.frame++;
-          this.oddFrame = !this.oddFrame;
         }
       }
     }
