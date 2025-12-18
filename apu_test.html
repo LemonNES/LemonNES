@@ -298,9 +298,8 @@
       }, {passive:false});
     }
   }
-//=== APU ===
  //=== APU ===
-class APU {
+ class APU {
   constructor() {
     this.reg = new Uint8Array(0x18);
     this.frameStep = 0;
@@ -308,12 +307,12 @@ class APU {
     this.cycles = 0;
     this.frameIRQ = false;
     this.sampleRate = 44100;
-    
-    class constructor
-   this.LENGTH_TABLE = [
-  10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-  12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
-];
+
+    // Standard NES Length Counter Lookup Table
+    this.LENGTH_TABLE = [
+      10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
+      12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+    ];
 
     this.pulse = [this.mkPulse(), this.mkPulse()];
     this.tri = this.mkTriangle();
@@ -327,7 +326,7 @@ class APU {
     this.node.onaudioprocess = (e) => this.pullSamples(e.outputBuffer.getChannelData(0));
     this.node.connect(this.ac.destination);
 
-    this.frameCounterRate = 7457; // CPU cycles per APU step
+    this.frameCounterRate = 7457; // NTSC: CPU cycles per APU step
     this.frameCounterMode = 0;    // 0 = 4-step, 1 = 5-step
     this.irqInhibit = false;      // Bit 6 of $4017
   }
@@ -339,7 +338,7 @@ class APU {
     return { timer: 0, phase: 0, enabled: false, length: 0, halt: false };
   }
   mkNoise() {
-    return { timer: 0, lfsr: 1, volume: 0, enabled: false, length: 0, halt: false };
+    return { timer: 0, lfsr: 1, volume: 0, enabled: false, length: 0, halt: false, mode: 0 };
   }
   mkDMC() {
     return { enabled: false, currentLen: 0, output: 0 };
@@ -354,11 +353,9 @@ class APU {
       if (this.noise.length > 0) s |= 8;
       if (this.dmc.currentLen > 0) s |= 16;
       
-      // TEST 3 FIX: Return Frame IRQ flag in bit 6
+      // Status read returns Frame IRQ in bit 6
       if (this.frameIRQ) s |= 0x40;
-      
-      // Reading $4015 clears the frame IRQ flag
-      this.frameIRQ = false; 
+      this.frameIRQ = false; // Reading clears the flag
       return s;
     }
     return 0;
@@ -374,43 +371,60 @@ class APU {
         this.pulse[ch].halt = !!(val & 0x20);
         this.pulse[ch].volume = val & 0x0F;
         break;
-      case 0x4002: case 0x4006: // Timer Low
+      case 0x4002: case 0x4006:
         this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val;
         break;
-      case 0x4003: case 0x4007: // Timer High & Length Counter Load
+      case 0x4003: case 0x4007:
         this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) << 8);
         if (this.pulse[ch].enabled) {
           this.pulse[ch].length = this.LENGTH_TABLE[val >> 3];
         }
-        this.pulse[ch].phase = 0; // Reset duty sequencer
+        this.pulse[ch].phase = 0;
         break;
-      case 0x400C: // Noise Volume/Halt
-      this.noise.halt = !!(val & 0x20); [span_2](start_span)// BIT 5: Halt length counter[span_2](end_span)
-      this.noise.constant = !!(val & 0x10);
-      this.noise.volume = val & 0x0F;
-      break;
-    case 0x400E: // Noise Period
-      this.noise.mode = (val >> 7) & 1;
-      this.noise.timer = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068][val & 0x0F];
-      break;
-    case 0x400F: // Noise Length Counter Load
-      if (this.noise.enabled) {
-        this.noise.length = this.LENGTH_TABLE[val >> 3]; // Load standard value
-      }
-      break;
-    
-    case 0x4015: // Status
-      this.pulse[0].enabled = !!(val & 1);
-      this.pulse[1].enabled = !!(val & 2);
-      this.tri.enabled = !!(val & 4);
-      this.noise.enabled = !!(val & 8);
-      // Immediately clear length if disabled
-      if (!this.noise.enabled) this.noise.length = 0;
-      break;
+      case 0x4008:
+        this.tri.halt = !!(val & 0x80);
+        break;
+      case 0x400B:
+        this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) << 8);
+        if (this.tri.enabled) this.tri.length = this.LENGTH_TABLE[val >> 3];
+        break;
+      case 0x400C: // Noise Halt and Volume
+        this.noise.halt = !!(val & 0x20);
+        this.noise.volume = val & 0x0F;
+        break;
+      case 0x400E: // Noise Period
+        this.noise.mode = (val >> 7) & 1;
+        this.noise.timer = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068][val & 0x0F];
+        break;
+      case 0x400F: // Noise Length Counter Load
+        if (this.noise.enabled) {
+          this.noise.length = this.LENGTH_TABLE[val >> 3];
+        }
+        break;
+      case 0x4015:
+        this.pulse[0].enabled = !!(val & 1);
+        this.pulse[1].enabled = !!(val & 2);
+        this.tri.enabled = !!(val & 4);
+        this.noise.enabled = !!(val & 8);
+        // Disabling a channel clears its length counter immediately
+        if (!this.pulse[0].enabled) this.pulse[0].length = 0;
+        if (!this.pulse[1].enabled) this.pulse[1].length = 0;
+        if (!this.tri.enabled) this.tri.length = 0;
+        if (!this.noise.enabled) this.noise.length = 0;
+        break;
+      case 0x4017:
+        this.frameCounterMode = (val >> 7) & 1;
+        this.irqInhibit = !!(val & 0x40);
+        this.frameStep = 0;
+        this.divider = 0;
+        if (this.irqInhibit) this.frameIRQ = false;
+        // In 5-step mode, clock units immediately
+        if (this.frameCounterMode === 1) this.clockLengthCounters();
+        break;
+    }
   }
-}
 
-  clockLengthAndSweep() {
+  clockLengthCounters() {
     [this.pulse[0], this.pulse[1], this.tri, this.noise].forEach(ch => {
       if (ch.length > 0 && !ch.halt) ch.length--;
     });
@@ -421,44 +435,19 @@ class APU {
     if (this.divider >= this.frameCounterRate) {
       this.divider -= this.frameCounterRate;
 
-          [span_3](start_span)// Increment frame step based on 4 or 5 step mode[span_3](end_span)
-    this.frameStep = (this.frameStep + 1) % (this.frameCounterMode ? 5 : 4);
-    
-    // Clock Length Counters on specific steps (simplified 4-step)
-    if (this.frameStep === 1 || this.frameStep === 3) {
-      this.clockLength();
-    }
-  }
-}
-
-clockLength() {
-  // Only decrement if halt bit is NOT set
-  if (this.noise.length > 0 && !this.noise.halt) {
-    this.noise.length--;
-  }
-  // Repeat for pulse and tri channels...
-  [this.pulse[0], this.pulse[1], this.tri].forEach(ch => {
-    if (ch.length > 0 && !ch.halt) ch.length--;
-  });
-
       if (this.frameCounterMode === 0) {
         // 4-step sequence
         this.frameStep = (this.frameStep + 1) % 4;
-        if (this.frameStep === 1 || this.frameStep === 3) {
-          this.clockLengthAndSweep();
-        }
-        // Set IRQ flag on step 3 if not inhibited
-        if (this.frameStep === 3 && !this.irqInhibit) {
-          this.frameIRQ = true;
-        }
+        if (this.frameStep === 1 || this.frameStep === 3) this.clockLengthCounters();
+        // Set IRQ flag on last step if not inhibited
+        if (this.frameStep === 3 && !this.irqInhibit) this.frameIRQ = true;
       } else {
         // 5-step sequence
         this.frameStep = (this.frameStep + 1) % 5;
-        if (this.frameStep === 0 || this.frameStep === 2) {
-          this.clockLengthAndSweep();
-        }
+        if (this.frameStep === 0 || this.frameStep === 2) this.clockLengthCounters();
       }
     }
+  }
 
   pullSamples(out) {
     const len = out.length;
@@ -466,10 +455,8 @@ clockLength() {
       const sq = (ch) => {
         if (!ch.enabled || ch.length === 0 || ch.timer < 8) return 0;
         const duties = [
-          [0,1,0,0,0,0,0,0], // 12.5%
-          [0,1,1,0,0,0,0,0], // 25%
-          [0,1,1,1,1,0,0,0], // 50%
-          [1,0,0,1,1,1,1,1]  // 25% negated
+          [0,1,0,0,0,0,0,0], [0,1,1,0,0,0,0,0], 
+          [0,1,1,1,1,0,0,0], [1,0,0,1,1,1,1,1]
         ];
         const period = (ch.timer + 1) * 2;
         const phase = Math.floor((this.cycles++ / period) % 8);
@@ -478,12 +465,10 @@ clockLength() {
       
       const p1 = sq(this.pulse[0]);
       const p2 = sq(this.pulse[1]);
-      // Normalized output
-      out[i] = (p1 + p2) * 0.1;
+      out[i] = (p1 + p2) * 0.1; 
     }
   }
 }
-
  // ===== Mappers =====
  class Mapper {
     constructor(cart){ this.cart=cart; }
