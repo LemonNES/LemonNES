@@ -302,219 +302,104 @@
   class APU {
   constructor() {
     this.reg = new Uint8Array(0x18);
-    this.frameStep = 0;
-    this.frameCounter = 0;
-    this.cycles = 0;
-    this.frameIRQ = false;
     this.sampleRate = 44100;
-    this.divider = 0;
+    this.cpuFrequency = 1789773; // NTSC Frequency
+    
+    // --- NEW: Audio Timing & Buffering ---
+    this.sampleClockRatio = this.cpuFrequency / this.sampleRate;
+    this.sampleClockCounter = 0;
+    this.audioBuffer = [];
+    this.maxBufferSize = 4096; 
+    this.lastOut = 0; // For smoothing filter
+
     this.pulse = [this.mkPulse(), this.mkPulse()];
     this.tri = this.mkTriangle();
     this.noise = this.mkNoise();
     this.dmc = this.mkDMC();
+
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ac = new AC();
-    this.bufferSize = 2048;
-    this.node = this.ac.createScriptProcessor(this.bufferSize, 0, 1);
+    this.node = this.ac.createScriptProcessor(2048, 0, 1);
     this.node.onaudioprocess = (e) => this.pullSamples(e.outputBuffer.getChannelData(0));
     this.gain = this.ac.createGain();
     this.gain.gain.value = 0.2;
     this.node.connect(this.gain).connect(this.ac.destination);
-    this.frameCounterRate = 7457; // NTSC: CPU cycles per APU frame sequence step
-    this.frameCounterSteps = [3729, 7457, 11186, 14916, 18640];
-    this.frameCounterLength = 14916;
-    this.frameCounterMode = 0;
+
+    this.frameCounterRate = 7457;
+    this.divider = 0;
   }
-  mkPulse() {
-    return {
-      timer: 0,
-      phase: 0,
-      duty: 0,
-      volume: 0x0F,
-      enabled: true,
-      length: 0,
-      env: 0x0F,
-      constant: 1,
-      sweep: { enabled: false, period: 0, shift: 0, negate: false, reload: false, counter: 0 },
-    };
-  }
-  mkTriangle() {
-    return { timer: 0, phase: 0, enabled: true, length: 0, linear: 0x7F, counter: 0 };
-  }
-  mkNoise() {
-    return {
-      timer: 0,
-      lfsr: 1,
-      volume: 0x0F,
-      enabled: true,
-      length: 0,
-      env: 0x0F,
-      mode: 0,
-      period: 0,
-    };
-  }
-  mkDMC() {
-    return {
-      enabled: false,
-      irq: false,
-      loop: false,
-      rate: 0,
-      sampleAddr: 0xC000,
-      sampleLen: 1,
-      shiftReg: 0,
-      bitsRemaining: 0,
-      output: 0,
-      silence: true,
-      currentAddr: 0,
-      currentLen: 0,
-      sampleBuffer: 0,
-      needSample: false,
-    };
-  }
-  read(addr) {
-    if (addr === 0x4015) {
-      let s = 0;
-      if (this.pulse[0].length) s |= 1;
-      if (this.pulse[1].length) s |= 2;
-      if (this.tri.length) s |= 4;
-      if (this.noise.length) s |= 8;
-      if (this.dmc.currentLen) s |= 16;
-      return s;
-    }
-    return 0;
-  }
-  write(addr, val) {
-    this.reg[addr - 0x4000] = val;
-    const ch = (addr >> 2) & 1;
-    switch (addr) {
-      case 0x4000:
-      case 0x4004:
-        this.pulse[ch].duty = (val >> 6) & 3;
-        this.pulse[ch].constant = (val >> 4) & 1;
-        this.pulse[ch].volume = val & 0x0F;
-        break;
-      case 0x4001:
-      case 0x4005:
-        this.pulse[ch].sweep.enabled = !!(val & 0x80);
-        this.pulse[ch].sweep.period = (val >> 4) & 7;
-        this.pulse[ch].sweep.negate = !!(val & 8);
-        this.pulse[ch].sweep.shift = val & 7;
-        this.pulse[ch].sweep.reload = true;
-        break;
-      case 0x4002:
-      case 0x4006:
-        this.pulse[ch].timer = (this.pulse[ch].timer & 0x700) | val;
-        break;
-      case 0x4003:
-      case 0x4007:
-        this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) << 8);
-        this.pulse[ch].length = 0x1F;
-        this.pulse[ch].phase = 0;
-        break;
-      case 0x4008:
-        this.tri.linear = val & 0x7F;
-        break;
-      case 0x400A:
-        this.tri.timer = (this.tri.timer & 0x700) | val;
-        break;
-      case 0x400B:
-        this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) << 8);
-        this.tri.length = 0x1F;
-        this.tri.phase = 0;
-        break;
-      case 0x400C:
-        this.noise.constant = (val >> 4) & 1;
-        this.noise.volume = val & 0x0F;
-        break;
-      case 0x400E:
-        this.noise.mode = (val >> 7) & 1;
-        this.noise.timer = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068][val & 0x0F];
-        break;
-      case 0x400F:
-        this.noise.length = 0x1F;
-        break;
-      case 0x4015:
-        this.pulse[0].enabled = !!(val & 1);
-        this.pulse[1].enabled = !!(val & 2);
-        this.tri.enabled = !!(val & 4);
-        this.noise.enabled = !!(val & 8);
-        this.dmc.enabled = !!(val & 16);
-        break;
-      case 0x4017:
-        this.frameCounterMode = (val >> 7) & 1;
-        break;
-    }
-  }
+
+  // ... (Keep your existing mkPulse, mkTriangle, mkNoise, mkDMC, read, and write methods) ...
+
   step(cycles) {
-    // Accurate frame sequencer
+    // 1. Advance the frame sequencer (Envelopes/Sweeps)
     this.divider += cycles;
     if (this.divider >= this.frameCounterRate) {
       this.divider -= this.frameCounterRate;
-      this.frameCounter = (this.frameCounter + 1) % (this.frameCounterMode ? 5 : 4);
-      // Envelope, sweep, length, etc. would be triggered here for each frame step.
+      // In a full implementation, you'd trigger Envelope/Length ticks here
     }
-    // Channel timers (not exact NTSC ratios; MVP approximation)
-    const advance = (ch, tick) => {
-      while (this.cycles >= tick) {
-        this.cycles -= tick;
-        ch.phase = (ch.phase + 1) & 0x7FFF;
+
+    // 2. Advance channel internal phases by cycles
+    this.pulse[0].phase += cycles;
+    this.pulse[1].phase += cycles;
+    this.tri.phase += cycles;
+    this.noise.phase += cycles;
+
+    // 3. GENERATE SAMPLES AT FIXED INTERVALS
+    // This is the "Magic": we only create an audio sample when enough CPU cycles pass
+    this.sampleClockCounter += cycles;
+    while (this.sampleClockCounter >= this.sampleClockRatio) {
+      const sample = this.generateSample();
+      
+      // Apply a simple Low-Pass filter to remove "TV Static" harshness
+      // alpha = 0.5 creates a gentle roll-off of high frequencies
+      this.lastOut = this.lastOut + 0.5 * (sample - this.lastOut);
+      
+      if (this.audioBuffer.length < this.maxBufferSize) {
+        this.audioBuffer.push(this.lastOut);
       }
-    };
-    advance(this.pulse[0], 2);
-    advance(this.pulse[1], 2);
-    advance(this.tri, 2);
-    advance(this.noise, 1);
-    // Noise LFSR update
-    if (this.noise.timer) {
-      if ((this.noise.phase & 31) === 0) {
-        const bit =
-          (this.noise.lfsr ^ (this.noise.lfsr >> (this.noise.mode ? 6 : 1))) & 1;
-        this.noise.lfsr = (this.noise.lfsr >> 1) | (bit << 14);
-      }
+      this.sampleClockCounter -= this.sampleClockRatio;
     }
   }
+
+  generateSample() {
+    // Helper for Square channels
+    const getSquare = (ch) => {
+      if (!ch.enabled || !ch.length || ch.timer < 8) return 0;
+      const dutyTable = [0.125, 0.25, 0.50, 0.75];
+      const period = (ch.timer + 1) * 2; // Pulse period is 2 * (timer + 1) CPU cycles
+      const phase = (ch.phase / period) % 1.0;
+      return phase < dutyTable[ch.duty] ? (ch.constant ? ch.volume : ch.env) / 15 : 0;
+    };
+
+    const p1 = getSquare(this.pulse[0]);
+    const p2 = getSquare(this.pulse[1]);
+
+    // Triangle channel (using its specific 32-step sequence logic)
+    const triPeriod = (this.tri.timer + 1);
+    const triPhase = (this.tri.phase / triPeriod) % 32;
+    const triSteps = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15];
+    const triVal = (this.tri.enabled && this.tri.length) ? triSteps[Math.floor(triPhase)] / 15 : 0;
+
+    // Noise channel
+    if ((this.noise.phase % this.noise.timer) < 1) { // Simple LFSR tick
+        const bit = (this.noise.lfsr ^ (this.noise.lfsr >> (this.noise.mode ? 6 : 1))) & 1;
+        this.noise.lfsr = (this.noise.lfsr >> 1) | (bit << 14);
+    }
+    const n = (this.noise.enabled && this.noise.length && (this.noise.lfsr & 1)) ? (this.noise.volume / 15) : 0;
+
+    // NES Non-Linear Mixing Formulas
+    const pulseOut = (p1 + p2 === 0) ? 0 : 95.88 / (8128 / (p1 + p2) + 100);
+    const tndOut = (triVal + n === 0) ? 0 : 159.79 / (1 / (triVal / 8227 + n / 12241) + 100);
+
+    return pulseOut + tndOut;
+  }
+
   pullSamples(out) {
-    // More accurate mixing using NES formulas
-    const len = out.length;
-    for (let i = 0; i < len; i++) {
-      const sq = (ch) => {
-        if (!ch.enabled || !ch.length || ch.timer < 8) return 0;
-        const duty = [8, 4, 2, 1][ch.duty];
-        const period = (ch.timer + 1) * 16;
-        const t = ch.phase % period;
-        const on = t < period * (1 / duty);
-        const vol = ch.constant ? ch.volume : ch.env;
-        return on ? vol / 15 : 0;
-      };
-      const p1 = sq(this.pulse[0]);
-      const p2 = sq(this.pulse[1]);
-      const tri =
-        this.tri.enabled && this.tri.length && this.tri.timer >= 2
-          ? (() => {
-              const period = (this.tri.timer + 1) * 32;
-              const t = this.tri.phase % period;
-              const saw = t / period;
-              return (1 - Math.abs(2 * saw - 1)) * 0.7;
-            })()
-          : 0;
-      const n =
-        this.noise.enabled && this.noise.length
-          ? ((this.noise.lfsr & 1 ? 1 : -1) *
-              (this.noise.volume / 15) *
-              0.2)
-          : 0;
-      // NES mixing formula
-      const pulseOut =
-        p1 + p2
-          ? 95.88 /
-            (8128 / (p1 + p2) + 100)
-          : 0;
-      const tndOut =
-        tri + n + this.dmc.output
-          ? 159.79 /
-            (1 / (tri / 8227 + n / 12241 + this.dmc.output / 22638) + 100)
-          : 0;
-      out[i] = pulseOut + tndOut;
+    // Fill the sound card's buffer from our accumulated cycles
+    for (let i = 0; i < out.length; i++) {
+      // If we have samples ready, use them. If not (underrun), stay silent or repeat last.
+      out[i] = this.audioBuffer.length > 0 ? this.audioBuffer.shift() : this.lastOut;
     }
   }
 }
