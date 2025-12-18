@@ -308,12 +308,12 @@ class APU {
     this.cycles = 0;
     this.frameIRQ = false;
     this.sampleRate = 44100;
-
-    // Standard NES Length Counter Lookup Table
-    this.LENGTH_TABLE = [
-      10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-      12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
-    ];
+    
+    class constructor
+   this.LENGTH_TABLE = [
+  10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
+  12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+];
 
     this.pulse = [this.mkPulse(), this.mkPulse()];
     this.tri = this.mkTriangle();
@@ -384,38 +384,31 @@ class APU {
         }
         this.pulse[ch].phase = 0; // Reset duty sequencer
         break;
-      case 0x4008:
-        this.tri.halt = !!(val & 0x80);
-        break;
-      case 0x400B:
-        this.tri.timer = (this.tri.timer & 0xFF) | ((val & 0x07) << 8);
-        if (this.tri.enabled) this.tri.length = this.LENGTH_TABLE[val >> 3];
-        break;
-      case 0x400F:
-        if (this.noise.enabled) this.noise.length = this.LENGTH_TABLE[val >> 3];
-        break;
-      case 0x4015:
-        this.pulse[0].enabled = !!(val & 1);
-        this.pulse[1].enabled = !!(val & 2);
-        this.tri.enabled = !!(val & 4);
-        this.noise.enabled = !!(val & 8);
-        // Immediate length clear on disable
-        if (!this.pulse[0].enabled) this.pulse[0].length = 0;
-        if (!this.pulse[1].enabled) this.pulse[1].length = 0;
-        if (!this.tri.enabled) this.tri.length = 0;
-        if (!this.noise.enabled) this.noise.length = 0;
-        break;
-      case 0x4017:
-        this.frameCounterMode = (val >> 7) & 1;
-        this.irqInhibit = !!(val & 0x40);
-        this.frameStep = 0;
-        this.divider = 0;
-        if (this.irqInhibit) this.frameIRQ = false;
-        // 5-step mode clocks units immediately
-        if (this.frameCounterMode === 1) this.clockLengthAndSweep();
-        break;
-    }
+      case 0x400C: // Noise Volume/Halt
+      this.noise.halt = !!(val & 0x20); [span_2](start_span)// BIT 5: Halt length counter[span_2](end_span)
+      this.noise.constant = !!(val & 0x10);
+      this.noise.volume = val & 0x0F;
+      break;
+    case 0x400E: // Noise Period
+      this.noise.mode = (val >> 7) & 1;
+      this.noise.timer = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068][val & 0x0F];
+      break;
+    case 0x400F: // Noise Length Counter Load
+      if (this.noise.enabled) {
+        this.noise.length = this.LENGTH_TABLE[val >> 3]; // Load standard value
+      }
+      break;
+    
+    case 0x4015: // Status
+      this.pulse[0].enabled = !!(val & 1);
+      this.pulse[1].enabled = !!(val & 2);
+      this.tri.enabled = !!(val & 4);
+      this.noise.enabled = !!(val & 8);
+      // Immediately clear length if disabled
+      if (!this.noise.enabled) this.noise.length = 0;
+      break;
   }
+}
 
   clockLengthAndSweep() {
     [this.pulse[0], this.pulse[1], this.tri, this.noise].forEach(ch => {
@@ -427,6 +420,26 @@ class APU {
     this.divider += cycles;
     if (this.divider >= this.frameCounterRate) {
       this.divider -= this.frameCounterRate;
+
+          [span_3](start_span)// Increment frame step based on 4 or 5 step mode[span_3](end_span)
+    this.frameStep = (this.frameStep + 1) % (this.frameCounterMode ? 5 : 4);
+    
+    // Clock Length Counters on specific steps (simplified 4-step)
+    if (this.frameStep === 1 || this.frameStep === 3) {
+      this.clockLength();
+    }
+  }
+}
+
+clockLength() {
+  // Only decrement if halt bit is NOT set
+  if (this.noise.length > 0 && !this.noise.halt) {
+    this.noise.length--;
+  }
+  // Repeat for pulse and tri channels...
+  [this.pulse[0], this.pulse[1], this.tri].forEach(ch => {
+    if (ch.length > 0 && !ch.halt) ch.length--;
+  });
 
       if (this.frameCounterMode === 0) {
         // 4-step sequence
@@ -446,7 +459,6 @@ class APU {
         }
       }
     }
-  }
 
   pullSamples(out) {
     const len = out.length;
