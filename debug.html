@@ -766,7 +766,7 @@
     }
   }
   
- // ===== Mapper 4 (MMC3) =====
+
   // ===== Cartridge (iNES) =====
   class Cartridge {
     constructor(bytes) {
@@ -1264,115 +1264,90 @@
       img[idx + 2] = rgb[2];
       img[idx + 3] = 255;
     }
-    
-    step() {
-      if(this.mapper && this.mapper.ppuCycle) this.mapper.ppuCycle();
-      
-      const renderingEnabled = (this.mask & 0x18) !== 0;
-
-    // --- PPU REGISTERS UPDATE TIMING [FIX] ---
-    if (renderingEnabled) {
-      // Horizontal Scroll Bits (copyX)
-      // Occurs at dot 257 of every visible scanline and the pre-render line
-      if (this.cycle === 257) {
-        if (this.scanline < 240 || this.scanline === 261) {
-          // v: ....F.. ...XXXXX = t: ....F.. ...XXXXX
-          this.v = (this.v & 0x7BE0) | (this.t & 0x041F);
-        }
+    // Replace your existing step() method within the PPU class:
+  step() {
+    // 1. Progress cycle and scanline
+    this.cycle++;
+    if (this.cycle > 340) {
+      this.cycle = 0;
+      this.scanline++;
+      if (this.scanline > 261) {
+        this.scanline = 0;
+        this.frame++;
       }
+    }
+
+    const renderingEnabled = (this.mask & 0x18) !== 0;
+    const isVisibleLine = this.scanline < 240;
+    const isPrerenderLine = this.scanline === 261;
+
+    if (renderingEnabled) {
+      // --- PPU REGISTER TIMING [FIXED] ---
+      
+      // Horizontal Scroll Bits (copyX) 
+      // Occurs at dot 257 of every visible scanline and the pre-render line
+      if (this.cycle === 257 && (isVisibleLine || isPrerenderLine)) {
+        // v: ....F.. ...XXXXX = t: ....F.. ...XXXXX
+        this.v = (this.v & 0xFBE0) | (this.t & 0x041F);
+      }
+
       // Vertical Scroll Bits (copyY)
-      // Occurs during the pre-render scanline (261) between cycles 280 and 304
-      if (this.scanline === 261 && this.cycle >= 280 && this.cycle <= 304) {
+      // Occurs during the pre-render scanline only
+      if (isPrerenderLine && this.cycle >= 280 && this.cycle <= 304) {
         // v: .HIJKL. YY...RRR = t: .HIJKL. YY...RRR
         this.v = (this.v & 0x041F) | (this.t & 0x7BE0);
       }
+
+      // --- RENDERING LOGIC ---
+      if (isVisibleLine && this.cycle >= 1 && this.cycle <= 256) {
+        this.renderPixel();
+      }
+
+      // Fetching logic and shift register updates
+      if ((isVisibleLine || isPrerenderLine) && ((this.cycle >= 1 && this.cycle <= 256) || (this.cycle >= 321 && this.cycle <= 336))) {
+        this.updateShifts();
+        const subCycle = this.cycle % 8;
+        if (subCycle === 0) this.incCoarseX();
+        if (this.cycle === 256) this.incY();
+      }
     }
 
- 
-      
-      // Pre-render
-      if (this.scanline === 261) {
-        if (this.cycle === 1) this.status &= ~(0x80 | 0x40 | 0x20);
-        if (this.cycle >= 280 && this.cycle <= 304 && renderingEnabled) this.copyY();
-        
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 7) this.incCoarseX();
-        }
-      }
-      
-      // Visible
-      if (this.scanline >= 0 && this.scanline < 240) {
-        if (this.cycle === 1 && renderingEnabled) this.evalSprites();
-        
-        if (this.cycle >= 1 && this.cycle <= 256) {
-          if (renderingEnabled) {
-            this.bgShiftLo <<= 1;
-            this.bgShiftHi <<= 1;
-            this.bgAttrShiftLo <<= 1;
-            this.bgAttrShiftHi <<= 1;
-          }
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && renderingEnabled) this.reloadShifters();
-          if (cycleInTile === 1 && renderingEnabled) this.bgLatch = this.bgFetch();
-          
-          this.renderPixel(this.cycle - 1, this.scanline);
-          
-          if (cycleInTile === 7 && renderingEnabled) this.incCoarseX();
-        }
-        
-        if (this.cycle === 256 && renderingEnabled) this.incY();
-        if (this.cycle === 257 && renderingEnabled) this.copyX();
-        
-        if (this.cycle >= 321 && this.cycle <= 336 && renderingEnabled) {
-          this.bgShiftLo <<= 1;
-          this.bgShiftHi <<= 1;
-          this.bgAttrShiftLo <<= 1;
-          this.bgAttrShiftHi <<= 1;
-          
-          const cycleInTile = (this.cycle - 1) % 8;
-          if (cycleInTile === 0 && this.cycle > 321) this.reloadShifters();
-          if (cycleInTile === 1) this.bgLatch = this.bgFetch();
-          if (cycleInTile === 7) this.incCoarseX();
-        }
-      }
-      
-      if (this.scanline === 241 && this.cycle === 1) {
-        this.status |= 0x80;
-        if (this.ctrl & 0x80) this.nmiDelay = 2; 
-        this.ctx.putImageData(this.output, 0, 0);
-      }
-      
-      if (this.nmiDelay > 0) {
-        this.nmiDelay--;
-        if (this.nmiDelay === 0) this.nmi = true;
-      }
-  
-    // Ensure Mapper IRQ clocking remains at HBlank (cycle 260)
+    // 2. Interrupts and Flags
+    if (this.scanline === 241 && this.cycle === 1) {
+      this.status |= 0x80; // VBlank Start
+      if (this.ctrl & 0x80) this.nmi = true;
+    }
+    if (isPrerenderLine && this.cycle === 1) {
+      this.status &= ~0x80; // VBlank End
+      this.spriteZeroHit = false;
+      this.status &= ~0x40;
+    }
+
+    // Clock Mapper IRQ (important for MMC3/HUD splits)
     if (this.mapper && this.mapper.ppuCycle) {
-        this.mapper.ppuCycle();
+      this.mapper.ppuCycle();
     }
   }
-      this.cycle++;
-      if (this.cycle > 340) {
-        this.cycle = 0;
-        this.scanline++;
-        if (this.scanline > 261) {
-          this.scanline = 0;
-          this.frame++;
-          this.oddFrame = !this.oddFrame;
-        }
+
+  // Ensure incY() ONLY increments vertical scroll and does NOT copyX
+  incY() {
+    if ((this.v & 0x7000) !== 0x7000) {
+      this.v += 0x1000;
+    } else {
+      this.v &= ~0x7000;
+      let y = (this.v & 0x03E0) >> 5;
+      if (y === 29) {
+        y = 0;
+        this.v ^= 0x0800;
+      } else if (y === 31) {
+        y = 0;
+      } else {
+        y++;
       }
+      this.v = (this.v & ~0x03E0) | (y << 5);
     }
   }
+    
   // NES color palette
   const NTSC_PALETTE = [
     [124,124,124], [0,0,252], [0,0,188], [68,40,188], [148,0,132], [168,0,32], [168,16,0], [136,20,0],
