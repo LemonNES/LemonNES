@@ -299,18 +299,16 @@
     }
   }
 //=== APU ===
- //=== APU ===
 class APU {
   constructor() {
     this.reg = new Uint8Array(0x18);
     this.frameStep = 0;
-    this.frameCounter = 0;
+    this.divider = 0;
     this.cycles = 0;
     this.frameIRQ = false;
     this.sampleRate = 44100;
-    this.divider = 0;
 
-    // NES Length Counter Lookup Table
+    // NES Length Counter Lookup Table (Standard for all channels)
     this.LENGTH_TABLE = [
       10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
       12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
@@ -331,28 +329,31 @@ class APU {
     this.node.connect(this.gain).connect(this.ac.destination);
 
     this.frameCounterRate = 7457; // NTSC: CPU cycles per APU frame step
-    this.frameCounterMode = 0; // 0 = 4-step, 1 = 5-step
+    this.frameCounterMode = 0;    // 0 = 4-step, 1 = 5-step
     this.irqEnabled = true;
   }
 
   mkPulse() {
     return {
       timer: 0, phase: 0, duty: 0, volume: 0, 
-      enabled: false, length: 0, env: 0, constant: true, halt: false,
+      enabled: false, length: 0, halt: false, constant: true,
       sweep: { enabled: false, period: 0, shift: 0, negate: false, reload: false, counter: 0 }
     };
   }
 
   mkTriangle() {
-    return { timer: 0, phase: 0, enabled: false, length: 0, linear: 0, counter: 0, halt: false };
+    return { timer: 0, phase: 0, enabled: false, length: 0, linear: 0, halt: false };
   }
 
   mkNoise() {
-    return { timer: 0, lfsr: 1, volume: 0, enabled: false, length: 0, env: 0, constant: true, halt: false, mode: 0 };
+    return { 
+      timer: 0, lfsr: 1, volume: 0, enabled: false, 
+      length: 0, halt: false, constant: true, mode: 0 
+    };
   }
 
   mkDMC() {
-    return { enabled: false, irq: false, loop: false, rate: 0, output: 0, currentLen: 0 };
+    return { enabled: false, irq: false, currentLen: 0, output: 0 };
   }
 
   read(addr) {
@@ -363,8 +364,7 @@ class APU {
       if (this.tri.length > 0) s |= 4;
       if (this.noise.length > 0) s |= 8;
       if (this.dmc.currentLen > 0) s |= 16;
-      // Reading $4015 clears the frame IRQ flag
-      this.frameIRQ = false;
+      this.frameIRQ = false; // Reading $4015 clears frame IRQ flag
       return s;
     }
     return 0;
@@ -377,19 +377,19 @@ class APU {
     switch (addr) {
       case 0x4000: case 0x4004:
         this.pulse[ch].duty = (val >> 6) & 3;
-        this.pulse[ch].halt = !!(val & 0x20); // Length halt / envelope loop
+        this.pulse[ch].halt = !!(val & 0x20); // Length halt bit
         this.pulse[ch].constant = !!(val & 0x10);
         this.pulse[ch].volume = val & 0x0F;
         break;
       case 0x4003: case 0x4007:
         this.pulse[ch].timer = (this.pulse[ch].timer & 0xFF) | ((val & 0x07) << 8);
         if (this.pulse[ch].enabled) {
-          this.pulse[ch].length = this.LENGTH_TABLE[val >> 3];
+          this.pulse[ch].length = this.LENGTH_TABLE[val >> 3]; // Load from table
         }
-        this.pulse[ch].phase = 0; // Reset sequencer
+        this.pulse[ch].phase = 0;
         break;
       case 0x4008:
-        this.tri.halt = !!(val & 0x80); // Control flag / Length halt
+        this.tri.halt = !!(val & 0x80); // Control flag acts as length halt
         this.tri.linear = val & 0x7F;
         break;
       case 0x400B:
@@ -398,20 +398,24 @@ class APU {
           this.tri.length = this.LENGTH_TABLE[val >> 3];
         }
         break;
+      case 0x400C:
+        this.noise.halt = !!(val & 0x20); // Noise halt bit
+        this.noise.constant = !!(val & 0x10);
+        this.noise.volume = val & 0x0F;
+        break;
       case 0x400F:
         if (this.noise.enabled) {
-          this.noise.length = this.LENGTH_TABLE[val >> 3];
+          this.noise.length = this.LENGTH_TABLE[val >> 3]; // Correct table load
         }
         break;
       case 0x4015:
-        // Proper handling of $4015 write: enable/disable channels
+        // Channel enable/disable
         this.pulse[0].enabled = !!(val & 1);
         this.pulse[1].enabled = !!(val & 2);
         this.tri.enabled = !!(val & 4);
         this.noise.enabled = !!(val & 8);
         this.dmc.enabled = !!(val & 16);
-
-        // If a channel is disabled, its length counter is immediately cleared
+        // Disabling a channel immediately clears its length counter
         if (!this.pulse[0].enabled) this.pulse[0].length = 0;
         if (!this.pulse[1].enabled) this.pulse[1].length = 0;
         if (!this.tri.enabled) this.tri.length = 0;
@@ -422,17 +426,19 @@ class APU {
         this.irqEnabled = !(val & 0x40);
         this.frameStep = 0;
         this.divider = 0;
-        // If 5-step mode, length/sweep clocks immediately
         if (this.frameCounterMode === 1) {
-          this.clockLengthAndSweep();
+          this.clockLengthAndSweep(); // 5-step mode clocks immediately
         }
         break;
     }
   }
 
+  // Clocks length counters and sweep units
   clockLengthAndSweep() {
-    [...this.pulse, this.tri, this.noise].forEach(ch => {
-      if (ch.length > 0 && !ch.halt) ch.length--;
+    [this.pulse[0], this.pulse[1], this.tri, this.noise].forEach(ch => {
+      if (ch.length > 0 && !ch.halt) {
+        ch.length--;
+      }
     });
   }
 
@@ -441,15 +447,17 @@ class APU {
     if (this.divider >= this.frameCounterRate) {
       this.divider -= this.frameCounterRate;
       
-      // APU Frame Counter Logic
-      // 4-step: [Env], [Env, Len], [Env], [Env, Len + IRQ]
-      // 5-step: [Env, Len], [Env], [Env, Len], [Env], [Nothing]
       if (this.frameCounterMode === 0) {
+        // 4-step mode
         this.frameStep = (this.frameStep + 1) % 4;
+        // Steps 1 and 3 clock length/sweep
         if (this.frameStep === 1 || this.frameStep === 3) this.clockLengthAndSweep();
+        // Step 3 triggers IRQ if enabled
         if (this.frameStep === 3 && this.irqEnabled) this.frameIRQ = true;
       } else {
+        // 5-step mode
         this.frameStep = (this.frameStep + 1) % 5;
+        // Steps 0 and 2 clock length/sweep
         if (this.frameStep === 0 || this.frameStep === 2) this.clockLengthAndSweep();
       }
     }
@@ -459,9 +467,9 @@ class APU {
     const len = out.length;
     for (let i = 0; i < len; i++) {
       const sq = (ch) => {
-        // Channel is silent if length counter is zero
+        // Gates: enabled, length counter > 0, and timer valid
         if (!ch.enabled || ch.length === 0 || ch.timer < 8) return 0;
-        const duty = [0.125, 0.25, 0.5, 0.75][ch.duty];
+        const duty = [0.125, 0.25, 0.50, 0.75][ch.duty];
         const period = (ch.timer + 1) * 2;
         const phase = (this.cycles++ / period) % 1.0;
         return (phase < duty) ? (ch.volume / 15) : 0;
@@ -470,12 +478,13 @@ class APU {
       const p1 = sq(this.pulse[0]);
       const p2 = sq(this.pulse[1]);
       
-      // Basic mixing
+      // Simple mixer (0.0 to 1.0)
       const pulseOut = (p1 + p2) > 0 ? 95.88 / (8128 / (p1 + p2) + 100) : 0;
       out[i] = pulseOut;
     }
   }
 }
+
  
  // ===== Mappers =====
  class Mapper {
