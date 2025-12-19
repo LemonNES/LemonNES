@@ -741,8 +741,6 @@ class APU {
     chrRead(addr) { return 0; }
     chrWrite(addr, val) { }
     ppuCycle() {}
-    ppuA12Rising(){}
-    get mirroring(){ return this.cart.mirror; }
   }
   // NROM (0)
   class Mapper0 extends Mapper{
