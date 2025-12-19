@@ -735,11 +735,12 @@ class APU {
 
    // ===== Mappers =====
  class Mapper {
-    constructor(cart){ this.cart=cart; }
-    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
-    prgWrite(addr,val){}
-    chrRead(addr){ return this.cart.chr[addr]; }
-    chrWrite(addr,val){ if(this.cart.chrRAM) this.cart.chr[addr]=val; }
+    constructor(cart) { this.cart = cart; }
+    prgRead(addr) { return 0; }
+    prgWrite(addr, val) { }
+    chrRead(addr) { return 0; }
+    chrWrite(addr, val) { }
+    ppuCycle() {}
     ppuA12Rising(){}
     get mirroring(){ return this.cart.mirror; }
   }
