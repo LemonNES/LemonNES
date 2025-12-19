@@ -733,16 +733,17 @@ class APU {
   ];
 }
 
-  // Base Mapper Class (Missing in original)
-  class Mapper {
-    constructor(cart) { this.cart = cart; }
-    prgRead(addr) { return 0; }
-    prgWrite(addr, val) { }
-    chrRead(addr) { return 0; }
-    chrWrite(addr, val) { }
-    ppuCycle() {}
+   // ===== Mappers =====
+ class Mapper {
+    constructor(cart){ this.cart=cart; }
+    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
+    prgWrite(addr,val){}
+    chrRead(addr){ return this.cart.chr[addr]; }
+    chrWrite(addr,val){ if(this.cart.chrRAM) this.cart.chr[addr]=val; }
+    ppuA12Rising(){}
+    get mirroring(){ return this.cart.mirror; }
   }
-  
+  // NROM (0)
   class Mapper0 extends Mapper{
     prgRead(addr){ if(this.cart.prg.length===0x4000 && addr>=0xC000) return this.cart.prg[addr-0xC000]; return this.cart.prg[addr-0x8000]; }
   }
