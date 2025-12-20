@@ -818,126 +818,175 @@ class APU {
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
   
- // ===== Mapper 4 (MMC3) - FIXED VERSION =====
+ // MMC3 (Mapper 4) - Fixed for Kirby/SMB3
   class Mapper4 extends Mapper {
     constructor(cart) {
-        super(cart);
-        this.cpu = null;
-        this.ppu = null;
+      super(cart);
+      this.cpu = null;
+      this.ppu = null;
 
-        // Registers
-        this.bankSelect = 0;
-        this.bankData = new Uint8Array(8);
-        this.prgMode = 0;
-        this.chrMode = 0;
-        
-        // IRQ - [FIX] Added reloadPending and proper state tracking
-        this.irqLatch = 0;
-        this.irqCounter = 0;
-        this.irqEnable = false;
-        this.irqReloadPending = false;
-        
-        // Banks
-        this.prgBanks = new Uint8Array(4);
-        this.chrBanks = new Uint8Array(8);
-        
-        // Setup default banks
-        this.prgBanksTotal = this.cart.prg.length / 0x2000;
-        this.lastBank = this.prgBanksTotal - 1;
-        this.updatePrgMapping();
-        this.updateChrMapping();
+      this.regs = new Uint8Array(8);
+      this.targetReg = 0;
+      this.prgMode = 0;
+      this.chrMode = 0;
+      
+      // IRQ State
+      this.irqCounter = 0;
+      this.irqLatch = 0;
+      this.irqEnable = false;
+      this.irqReload = false;
+      
+      // Mapping tables
+      this.prgBanks = new Int32Array(4);
+      this.chrBanks = new Int32Array(8);
+      
+      // Totals for bounds checking
+      this.prgCount = Math.floor(this.cart.prg.length / 0x2000);
+      this.chrCount = Math.floor(this.cart.chr.length / 0x400);
+
+      this.updateBanks();
     }
 
-    // --- Glue Logic - [REWRITTEN FOR PROPER IRQ TIMING] ---
+    writeRegister(addr, val) {
+      if (addr < 0xA000) {
+        if (!(addr & 1)) { // $8000: Bank Select
+          this.targetReg = val & 7;
+          this.prgMode = (val >> 6) & 1;
+          this.chrMode = (val >> 7) & 1;
+          this.updateBanks();
+        } else { // $8001: Bank Data
+          this.regs[this.targetReg] = val;
+          this.updateBanks();
+        }
+      } else if (addr < 0xC000) {
+        if (!(addr & 1)) { // $A000: Mirroring
+          if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
+        } 
+        // $A001: PRG RAM Protect (Ignored)
+      } else if (addr < 0xE000) {
+        if (!(addr & 1)) { // $C000: IRQ Latch
+          this.irqLatch = val;
+        } else { // $C001: IRQ Reload
+          this.irqReload = true;
+        }
+      } else {
+        if (!(addr & 1)) { // $E000: IRQ Disable
+          this.irqEnable = false;
+          if (this.cpu) this.cpu.irqLine = false; // Acknowledge IRQ
+        } else { // $E001: IRQ Enable
+          this.irqEnable = true;
+        }
+      }
+    }
+
+    // Called every PPU Cycle by the PPU step()
     ppuCycle() {
-        if (!this.ppu) return;
-        
-        const renderingEnabled = (this.ppu.mask & 0x18) !== 0;
-        if (!renderingEnabled) return;
-        
-        const scanline = this.ppu.scanline;
-        const cycle = this.ppu.cycle;
-        
-        // Clock counter once per scanline at cycle 260 (during HBlank)
-        // This is when MMC3 detects the scanline transition
-        if (cycle === 260 && scanline >= 0 && scanline <= 239) {
-            this.clockCounter();
-        }
+      // MMC3 IRQ clocks on A12 rises. 
+      // Approximate: Clock on cycle 260 of visible scanlines (and pre-render)
+      if (!this.ppu || (this.ppu.mask & 0x18) === 0) return;
+      if (this.ppu.cycle !== 260) return;
+      if (this.ppu.scanline > 239 && this.ppu.scanline < 261) return;
+
+      // Handle Counter
+      if (this.irqCounter === 0 || this.irqReload) {
+        this.irqCounter = this.irqLatch;
+        this.irqReload = false;
+      } else {
+        this.irqCounter--;
+      }
+
+      // Fire IRQ if counter reached 0 and is enabled
+      if (this.irqCounter === 0 && this.irqEnable) {
+        if (this.cpu) this.cpu.irqLine = true;
+      }
     }
 
-    // [NEW] Separate method for counter clocking logic
-    clockCounter() {
-        // [FIX] If reload is pending, reload the counter
-        if (this.irqReloadPending) {
-            this.irqCounter = this.irqLatch;
-            this.irqReloadPending = false;
-            return;
-        }
-        
-        // [FIX] Proper counter behavior
-        if (this.irqCounter === 0) {
-            this.irqCounter = this.irqLatch;
-        } else {
-            this.irqCounter--;
-        }
-        
-        // [FIX] Trigger IRQ when counter reaches 0 AND IRQ enabled
-        if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
-            this.cpu.irqLine = true;
-        }
+    updateBanks() {
+      // --- CHR Banks (1KB chunks) ---
+      // Mode 0: 2KB @ $0000, 2KB @ $0800, 1KB @ $1000...
+      // Mode 1: Inverted (1KB chunks @ $0000..., 2KB @ $1000...)
+      const r = this.regs;
+      if (this.chrMode === 0) {
+        this.chrBanks[0] = r[0] & 0xFE;
+        this.chrBanks[1] = r[0] | 1;
+        this.chrBanks[2] = r[1] & 0xFE;
+        this.chrBanks[3] = r[1] | 1;
+        this.chrBanks[4] = r[2];
+        this.chrBanks[5] = r[3];
+        this.chrBanks[6] = r[4];
+        this.chrBanks[7] = r[5];
+      } else {
+        this.chrBanks[0] = r[2];
+        this.chrBanks[1] = r[3];
+        this.chrBanks[2] = r[4];
+        this.chrBanks[3] = r[5];
+        this.chrBanks[4] = r[0] & 0xFE;
+        this.chrBanks[5] = r[0] | 1;
+        this.chrBanks[6] = r[1] & 0xFE;
+        this.chrBanks[7] = r[1] | 1;
+      }
+
+      // --- PRG Banks (8KB chunks) ---
+      // Mode 0: $8000=R6, $A000=R7, $C000=SecondLast, $E000=Last
+      // Mode 1: $8000=SecondLast, $A000=R7, $C000=R6, $E000=Last
+      const last = this.prgCount - 1;
+      if (this.prgMode === 0) {
+        this.prgBanks[0] = r[6];
+        this.prgBanks[1] = r[7];
+        this.prgBanks[2] = last - 1;
+        this.prgBanks[3] = last;
+      } else {
+        this.prgBanks[0] = last - 1;
+        this.prgBanks[1] = r[7];
+        this.prgBanks[2] = r[6];
+        this.prgBanks[3] = last;
+      }
     }
 
-    // --- CPU Handling (includes WRAM) ---
     prgRead(addr) {
-        // WRAM Access ($6000-$7FFF)
-        if (addr >= 0x6000 && addr <= 0x7FFF) {
-            return this.cart.sram[addr - 0x6000];
-        }
-        // Banked ROM Access ($8000-$FFFF)
-        let bankIdx = (addr - 0x8000) >> 13;
-        let bank = this.prgBanks[bankIdx];
-        return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
+      if (addr >= 0x6000 && addr < 0x8000) return this.cart.sram[addr - 0x6000];
+      
+      const bankIdx = (addr - 0x8000) >> 13; // 0..3
+      const offset = addr & 0x1FFF;
+      
+      // Safety mask to prevent crash on bad headers
+      let bank = this.prgBanks[bankIdx];
+      if (bank < 0) bank = 0;
+      if (bank >= this.prgCount) bank %= this.prgCount;
+      
+      return this.cart.prg[(bank * 0x2000) + offset];
     }
 
     prgWrite(addr, val) {
-        // WRAM Write
-        if (addr >= 0x6000 && addr <= 0x7FFF) {
-            this.cart.sram[addr - 0x6000] = val;
-            return;
-        }
-        // Register Writes
-        this.writeRegister(addr, val);
+      if (addr >= 0x6000 && addr < 0x8000) {
+        this.cart.sram[addr - 0x6000] = val;
+        return;
+      }
+      this.writeRegister(addr, val);
     }
 
-    // --- PPU Handling (includes CHR Mode Swap) ---
     chrRead(addr) {
-        let index = addr >> 10;
-        let offset = addr & 0x3FF;
-        
-        // Handle CHR Mode swap
-        let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
-        let bank = this.chrBanks[bankIndex];
-
-        const total = this.cart.chr.length >> 10;
-        if (total > 0) bank %= total;
-
-        return this.cart.chr[(bank * 1024) + offset];
+      const bankIdx = addr >> 10; // 0..7 (1KB blocks)
+      const offset = addr & 0x3FF;
+      
+      let bank = this.chrBanks[bankIdx];
+      if (bank >= this.chrCount) bank %= this.chrCount;
+      
+      return this.cart.chr[(bank * 0x400) + offset];
     }
-
+    
     chrWrite(addr, val) {
-        if (this.cart.chrROM) return;
-
-        let index = addr >> 10;
-        let offset = addr & 0x3FF;
-        let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
-        let bank = this.chrBanks[bankIndex];
-
-        const total = this.cart.chr.length >> 10;
-        if (total > 0) bank %= total;
-
-        this.cart.chr[(bank * 1024) + offset] = val;
+       // CHR RAM support if cart has it
+       if (!this.cart.chrROM) {
+         const bankIdx = addr >> 10;
+         const offset = addr & 0x3FF;
+         let bank = this.chrBanks[bankIdx];
+         // CHR RAM is usually just mapped linearly if present, 
+         // but if the mapper points to valid RAM space, we write it.
+         // For simple CHR-RAM games, we just write to the internal array.
+         this.cart.chr[(bank * 0x400) + offset] = val;
+       }
     }
-
     // --- Register Implementation ---
     writeRegister(addr, val) {
         if (addr < 0x8000) return;
