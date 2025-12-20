@@ -743,8 +743,36 @@ class APU {
     ppuCycle() {}
   }
   // NROM (0)
-  class Mapper0 extends Mapper{
-    prgRead(addr){ if(this.cart.prg.length===0x4000 && addr>=0xC000) return this.cart.prg[addr-0xC000]; return this.cart.prg[addr-0x8000]; }
+  class Mapper0 extends Mapper {
+    constructor(cart) {
+      super(cart);
+      // Determine if 16KB (NROM-128) or 32KB (NROM-256)
+      // 16KB games mirror the lower bank to the upper bank.
+      this.prgMask = (cart.prg.length > 0x4000) ? 0x7FFF : 0x3FFF;
+    }
+
+    prgRead(addr) {
+      // Maps $8000-$FFFF. 
+      // Subtract 0x8000 to get 0-based index. 
+      // Apply mask to handle mirroring automatically.
+      return this.cart.prg[(addr - 0x8000) & this.prgMask];
+    }
+
+    prgWrite(addr, val) {
+      // NROM has no PRG registers or write capabilities.
+    }
+
+    chrRead(addr) {
+      // Return data from CHR ROM/RAM
+      return this.cart.chr[addr];
+    }
+
+    chrWrite(addr, val) {
+      // Only write if the cartridge uses CHR-RAM
+      if (!this.cart.chrROM) {
+        this.cart.chr[addr] = val;
+      }
+    }
   }
   // MMC1 (1) – minimal (no SRAM/battery, IRQs). Shift register control.
   class Mapper1 extends Mapper{
