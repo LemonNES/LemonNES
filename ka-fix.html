@@ -545,6 +545,150 @@
         const R = this.bankData;
         this.chrBanks[0] = R[0] & 0xFE; this.chrBanks[1] = R[0] | 1; this.chrBanks[2] = R[1] & 0xFE; this.chrBanks[3] = R[1] | 1;
         this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3]; this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
+    }  reset() {
+    this.register = 0;
+    this.registers = new Uint8Array(8);
+    this.prgMode = 0;
+    this.chrMode = 0;
+    this.irqEnabled = false;
+    this.irqLatch = 0;
+    this.irqCounter = 0;
+    this.irqReload = false;
+    
+    // Initial mapping (safety defaults)
+    this.loadPRG(0, 0);
+    this.loadPRG(1, 1);
+    this.loadPRG(2, -2); // Second to last
+    this.loadPRG(3, -1); // Last bank fixed
+  }
+
+  write(addr, val) {
+    // Bank Select / Data ($8000-$9FFF)
+    if (addr < 0xA000) {
+      if (!(addr & 1)) {
+        // $8000: Command Register
+        this.register = val & 7;
+        this.prgMode = (val >> 6) & 1;
+        this.chrMode = (val >> 7) & 1;
+        this.updateBanks(); // Update immediate on config change
+      } else {
+        // $8001: Data Register
+        this.registers[this.register] = val;
+        this.updateBanks();
+      }
+      return;
+    }
+
+    // Mirroring / RAM Protect ($A000-$BFFF)
+    if (addr < 0xC000) {
+      if (!(addr & 1)) {
+        // $A000: Mirroring
+        // MMC3 Spec: Bit 0 determines mirroring.
+        // 0 = Vertical
+        // 1 = Horizontal
+        const mirroring = (val & 1) ? 1 : 0; // 1=Horiz, 0=Vert
+        this.nes.ppu.setMirroring(mirroring);
+      } else {
+        // $A001: PRG RAM Protect (often ignored in simple emus)
+        // Bit 7: Write protect, Bit 6: Enable
+      }
+      return;
+    }
+
+    // IRQ Control ($C000-$DFFF)
+    if (addr < 0xE000) {
+      if (!(addr & 1)) {
+        // $C000: IRQ Latch
+        this.irqLatch = val;
+      } else {
+        // $C001: IRQ Reload
+        this.irqCounter = 0;
+        this.irqReload = true;
+      }
+      return;
+    }
+
+    // IRQ Enable/Disable ($E000-$FFFF)
+    if (!(addr & 1)) {
+      // $E000: Disable IRQ
+      this.irqEnabled = false;
+      this.nes.cpu.irqRequested = false; // Acknowledge/Clear
+    } else {
+      // $E001: Enable IRQ
+      this.irqEnabled = true;
+    }
+  }
+
+  /**
+   * Helper to map banks based on registers[0-7] and mode bits
+   */
+  updateBanks() {
+    // CHR Banking (0-5)
+    // Mode 0: 2KB chunks at 0000, 1KB at 1000
+    // Mode 1: 1KB at 0000, 2KB chunks at 1000
+    if (this.chrMode === 0) {
+      this.loadCHR(0, this.registers[0] & 0xFE); // 2KB
+      this.loadCHR(1, this.registers[0] | 1);
+      this.loadCHR(2, this.registers[1] & 0xFE); // 2KB
+      this.loadCHR(3, this.registers[1] | 1);
+      this.loadCHR(4, this.registers[2]);
+      this.loadCHR(5, this.registers[3]);
+      this.loadCHR(6, this.registers[4]);
+      this.loadCHR(7, this.registers[5]);
+    } else {
+      this.loadCHR(0, this.registers[2]);
+      this.loadCHR(1, this.registers[3]);
+      this.loadCHR(2, this.registers[4]);
+      this.loadCHR(3, this.registers[5]);
+      this.loadCHR(4, this.registers[0] & 0xFE); // 2KB
+      this.loadCHR(5, this.registers[0] | 1);
+      this.loadCHR(6, this.registers[1] & 0xFE); // 2KB
+      this.loadCHR(7, this.registers[1] | 1);
+    }
+
+    // PRG Banking (6-7)
+    // R6 @ $8000 (or $C000), R7 @ $A000
+    // Fixed: Second to last @ $C000 (or $8000), Last @ $E000
+    if (this.prgMode === 0) {
+      // $8000 swappable, $C000 fixed to -2
+      this.loadPRG(0, this.registers[6]);
+      this.loadPRG(1, this.registers[7]);
+      this.loadPRG(2, -2);
+      this.loadPRG(3, -1);
+    } else {
+      // $8000 fixed to -2, $C000 swappable
+      this.loadPRG(0, -2);
+      this.loadPRG(1, this.registers[7]);
+      this.loadPRG(2, this.registers[6]);
+      this.loadPRG(3, -1);
+    }
+  }
+
+  loadPRG(bank, id) {
+    // Convenience wrapper for NES setPRGBank
+    // Handle negative ids (relative to end)
+    // Implementation depends on your emulator's method signature
+    this.nes.loadPRGBank(bank, id);
+  }
+
+  loadCHR(bank, id) {
+    // Convenience wrapper for NES setCHRBank
+    this.nes.loadCHRBank(bank, id);
+  }
+
+  scanline() {
+    // Triggered by PPU on A12 rise (approx scanline)
+    if (this.irqReload) {
+      this.irqCounter = this.irqLatch;
+      this.irqReload = false;
+    } else if (this.irqCounter === 0) {
+      this.irqCounter = this.irqLatch;
+    } else {
+      this.irqCounter--;
+    }
+
+    if (this.irqCounter === 0 && this.irqEnabled) {
+      this.nes.cpu.irqRequested = true;
     }
   }
   
