@@ -520,21 +520,37 @@
         let bank = this.chrBanks[bankIndex]; const total = this.cart.chr.length >> 10; if (total > 0) bank %= total;
         this.cart.chr[(bank * 1024) + offset] = val;
     }
-    writeRegister(addr, val) {
+        writeRegister(addr, val) {
         if (addr < 0x8000) return;
         if ((addr & 1) === 0) {
+            // Even Addresses ($8000, $A000, $C000, $E000)
             if (addr < 0xA000) {
-                this.bankSelect = val; const p = (val >> 6) & 1, c = (val >> 7) & 1;
+                // $8000: Bank Select & Config
+                this.bankSelect = val; 
+                const p = (val >> 6) & 1, c = (val >> 7) & 1;
                 if (this.prgMode !== p) { this.prgMode = p; this.updatePrgMapping(); }
                 if (this.chrMode !== c) { this.chrMode = c; this.updateChrMapping(); }
-            } else if (addr < 0xC000) { if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical'; } 
-            else if (addr < 0xE000) { this.irqLatch = val; } 
-            else { this.irqEnable = false; if (this.cpu) this.cpu.irqLine = false; }
+            } else if (addr < 0xC000) { 
+                // $A000: Mirroring
+                // [PATCH] Inverted logic to match the Kirby Fix.
+                // MMC3 sends 0 for Vertical, 1 for Horizontal.
+                // We map 0 -> 'vertical' (or inverted to 'horizontal' if your PPU required the swap).
+                // Based on previous fix: (val & 1) ? 0 : 1; 
+                // This implies we swap the standard output.
+                if (this.ppu) this.ppu.mirror = (val & 1) ? 'vertical' : 'horizontal'; 
+            } 
+            else if (addr < 0xE000) { this.irqLatch = val; } // $C000
+            else { this.irqEnable = false; if (this.cpu) this.cpu.irqLine = false; } // $E000
         } else {
-            if (addr < 0xA000) { this.bankData[this.bankSelect & 7] = val; (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); }
-            else if (addr < 0xC000) { }
-            else if (addr < 0xE000) { this.irqReload = true; }
-            else { this.irqEnable = true; }
+            // Odd Addresses ($8001, $A001, $C001, $E001)
+            if (addr < 0xA000) { 
+                // $8001: Bank Data
+                this.bankData[this.bankSelect & 7] = val; 
+                (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); 
+            }
+            else if (addr < 0xC000) { } // $A001: PRG RAM Protect (Ignored)
+            else if (addr < 0xE000) { this.irqReload = true; } // $C001
+            else { this.irqEnable = true; } // $E001
         }
     }
     updatePrgMapping() {
