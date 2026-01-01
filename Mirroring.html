@@ -483,75 +483,6 @@
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
-class Mapper4 extends Mapper {
-    constructor(nes) {
-      super(nes);
-      this.reset();
-    }
-
-    reset() {
-      this.registers = new Uint8Array(8);
-      this.wram = new Uint8Array(0x2000);
-      this.prgBank = new Uint8Array(4);
-      this.chrBank = new Uint8Array(8);
-      
-      this.command = 0;
-      this.prgAddress = 0;
-      this.chrAddress = 0;
-      
-      this.irqCounter = 0;
-      this.irqLatch = 0;
-      this.irqEnabled = false;
-      this.irqReload = false;
-      
-      // Initial Banks
-      this.prgBank[0] = 0;
-      this.prgBank[1] = 1;
-      this.prgBank[2] = -2; // Fixed to second to last
-      this.prgBank[3] = -1; // Fixed to last
-    }
-
-    write(address, value) {
-      if (address < 0x8000) {
-        // PRG RAM (Save RAM) - usually $6000-$7FFF
-        if (address >= 0x6000) {
-          this.wram[address - 0x6000] = value;
-        }
-        return;
-      }
-
-      switch (address & 0xE001) {
-        case 0x8000: // Bank Select
-          this.command = value & 7;
-          this.prgAddress = (value >> 6) & 1;
-          this.chrAddress = (value >> 7) & 1;
-          this.updateBanks();
-          break;
-
-        case 0x8001: // Bank Data
-          this.registers[this.command] = value;
-          this.updateBanks();
-          break;
-
-        case 0xA000: // Mirroring
-          if (!(address & 1)) {
-            // MMC3: 0=Vertical, 1=Horizontal
-            // PPU usually: 0=Horizontal, 1=Vertical. 
-            // We flip the bit to match standard NES PPU definitions.
-            this.nes.ppu.setMirroring((value & 1) ? 0 : 1);
-          } else {
-             // PRG RAM Protect (Ignored in most simple emus)
-          }
-          break;
-
-        case 0xC000: // IRQ Latch
-          if (!(address & 1)) {
-            this.irqLatch = value;
-          } else {
-            // IRQ Reload
-            this.irqReload = true;
-          }
-          break;
 
         case 0xE000: // IRQ Disable / Enable
           if (!(address & 1)) {
@@ -563,69 +494,218 @@ class Mapper4 extends Mapper {
           break;
       }
     }
+class Mapper4 extends Mapper {
+    constructor(cart) {
+        super(cart);
 
-    read(address) {
-      if (address >= 0x6000 && address < 0x8000) {
-        return this.wram[address - 0x6000];
-      }
-      return super.read(address); // Forward to PRG ROM read
+        this.cpu = null;
+        this.ppu = null;
+
+        // Registers
+        this.bankSelect = 0;
+        this.bankData = new Uint8Array(8);
+
+        this.prgMode = 0;
+        this.chrMode = 0;
+
+        // IRQ
+        this.irqLatch = 0;
+        this.irqCounter = 0;
+        this.irqEnable = false;
+        this.irqReloadPending = false;
+
+        // A12 tracking
+        this.lastA12 = 0;
+        this.a12LowCycles = 0;
+
+        // Banking
+        this.prgBanksTotal = this.cart.prg.length >> 13;
+        this.lastBank = this.prgBanksTotal - 1;
+
+        this.prgBanks = new Uint8Array(4);
+        this.chrBanks = new Uint8Array(8);
+
+        this.updatePrgMapping();
+        this.updateChrMapping();
     }
 
-    updateBanks() {
-      // PRG Banks
-      if (this.prgAddress === 0) {
-        // $8000-$9FFF swappable, $C000-$DFFF fixed to second-last
-        this.loadPrgBank(0, this.registers[6]);
-        this.loadPrgBank(1, this.registers[7]);
-        this.loadPrgBank(2, -2);
-        this.loadPrgBank(3, -1);
-      } else {
-        // $C000-$DFFF swappable, $8000-$9FFF fixed to second-last
-        this.loadPrgBank(0, -2);
-        this.loadPrgBank(1, this.registers[7]);
-        this.loadPrgBank(2, this.registers[6]);
-        this.loadPrgBank(3, -1);
-      }
+    /* ================= IRQ / PPU ================= */
 
-      // CHR Banks
-      // R0, R1 are 2KB. R2, R3, R4, R5 are 1KB.
-      if (this.chrAddress === 0) {
-        // Standard Layout: 2KB banks at $0000
-        this.loadChrBank(0, this.registers[0] & 0xFE);
-        this.loadChrBank(1, this.registers[0] | 1);
-        this.loadChrBank(2, this.registers[1] & 0xFE);
-        this.loadChrBank(3, this.registers[1] | 1);
-        this.loadChrBank(4, this.registers[2]);
-        this.loadChrBank(5, this.registers[3]);
-        this.loadChrBank(6, this.registers[4]);
-        this.loadChrBank(7, this.registers[5]);
-      } else {
-        // Swapped Layout: 2KB banks at $1000 (The "Upside Down" culprit if wrong)
-        this.loadChrBank(0, this.registers[2]);
-        this.loadChrBank(1, this.registers[3]);
-        this.loadChrBank(2, this.registers[4]);
-        this.loadChrBank(3, this.registers[5]);
-        this.loadChrBank(4, this.registers[0] & 0xFE);
-        this.loadChrBank(5, this.registers[0] | 1);
-        this.loadChrBank(6, this.registers[1] & 0xFE);
-        this.loadChrBank(7, this.registers[1] | 1);
-      }
+    ppuCycle() {
+        if (!this.ppu) return;
+
+        const rendering = (this.ppu.mask & 0x18) !== 0;
+        if (!rendering) return;
+
+        const addr = this.ppu.vramAddr;
+        const a12 = (addr >> 12) & 1;
+
+        if (a12 === 0) {
+            this.a12LowCycles++;
+        }
+
+        // A12 rising edge with debounce
+        if (this.lastA12 === 0 && a12 === 1 && this.a12LowCycles >= 8) {
+            this.clockIRQ();
+            this.a12LowCycles = 0;
+        }
+
+        this.lastA12 = a12;
     }
+
+    clockIRQ() {
+        if (this.irqCounter === 0 || this.irqReloadPending) {
+            this.irqCounter = this.irqLatch;
+        } else {
+            this.irqCounter--;
+        }
+
+        this.irqReloadPending = false;
+
+        if (this.irqCounter === 0 && this.irqEnable && this.cpu) {
+            this.cpu.irqLine = true;
+        }
+    }
+
+    /* ================= CPU READ / WRITE ================= */
+
+    prgRead(addr) {
+        if (addr >= 0x6000 && addr <= 0x7FFF) {
+            return this.cart.sram[addr - 0x6000];
+        }
+
+        const bank = this.prgBanks[(addr - 0x8000) >> 13];
+        return this.cart.prg[(bank << 13) | (addr & 0x1FFF)];
+    }
+
+    prgWrite(addr, val) {
+        if (addr >= 0x6000 && addr <= 0x7FFF) {
+            this.cart.sram[addr - 0x6000] = val;
+            return;
+        }
+
+        this.writeRegister(addr, val);
+    }
+
+    /* ================= CHR ================= */
+
+    chrRead(addr) {
+        const bank = this.chrBanks[addr >> 10];
+        return this.cart.chr[(bank << 10) | (addr & 0x3FF)];
+    }
+
+    chrWrite(addr, val) {
+        if (this.cart.chrROM) return;
+
+        const bank = this.chrBanks[addr >> 10];
+        this.cart.chr[(bank << 10) | (addr & 0x3FF)] = val;
+    }
+
+    /* ================= REGISTERS ================= */
+
+    writeRegister(addr, val) {
+        if (addr < 0x8000) return;
+
+        const even = (addr & 1) === 0;
+
+        if (even) {
+            if (addr < 0xA000) {
+                this.bankSelect = val;
+                const newPrgMode = (val >> 6) & 1;
+                const newChrMode = (val >> 7) & 1;
+
+                if (this.prgMode !== newPrgMode) {
+                    this.prgMode = newPrgMode;
+                    this.updatePrgMapping();
+                }
+
+                if (this.chrMode !== newChrMode) {
+                    this.chrMode = newChrMode;
+                    this.updateChrMapping();
+                }
+            }
+            else if (addr < 0xC000) {
+                if (this.cart.mirroring === 'mapper' && this.ppu) {
+                    this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
+                }
+            }
+            else if (addr < 0xE000) {
+                this.irqLatch = val;
+            }
+            else {
+                this.irqEnable = false;
+                if (this.cpu) this.cpu.irqLine = false;
+            }
+        } else {
+            if (addr < 0xA000) {
+                const reg = this.bankSelect & 7;
+                this.bankData[reg] = val;
+
+                if (reg >= 6) this.updatePrgMapping();
+                else this.updateChrMapping();
+            }
+            else if (addr < 0xC000) {
+                // PRG RAM protect (ignored)
+            }
+            else if (addr < 0xE000) {
+                this.irqReloadPending = true;
+            }
+            else {
+                this.irqEnable = true;
+            }
+        }
+    }
+
+    /* ================= BANKING ================= */
+
+    updatePrgMapping() {
+        const max = this.prgBanksTotal;
+
+        const b6 = this.bankData[6] % max;
+        const b7 = this.bankData[7] % max;
+
+        if (this.prgMode === 0) {
+            this.prgBanks[0] = b6;
+            this.prgBanks[1] = b7;
+            this.prgBanks[2] = this.lastBank - 1;
+            this.prgBanks[3] = this.lastBank;
+        } else {
+            this.prgBanks[0] = this.lastBank - 1;
+            this.prgBanks[1] = b7;
+            this.prgBanks[2] = b6;
+            this.prgBanks[3] = this.lastBank;
+        }
+    }
+
+    updateChrMapping() {
+        const R = this.bankData;
+        const chrCount = this.cart.chr.length >> 10;
+
+        let banks = [
+            R[0] & 0xFE, R[0] | 1,
+            R[1] & 0xFE, R[1] | 1,
+            R[2], R[3], R[4], R[5]
+        ];
+
+        for (let i = 0; i < 8; i++) {
+            banks[i] %= chrCount;
+        }
+
+        if (this.chrMode === 0) {
+            this.chrBanks.set(banks);
+        } else {
+            this.chrBanks[0] = banks[4];
+            this.chrBanks[1] = banks[5];
+            this.chrBanks[2] = banks[6];
+            this.chrBanks[3] = banks[7];
+            this.chrBanks[4] = banks[0];
+            this.chrBanks[5] = banks[1];
+            this.chrBanks[6] = banks[2];
+            this.chrBanks[7] = banks[3];
+        }
+    }
+}
     
-    // CRITICAL: This fixes the "Upside Down" status bar glitch
-    scanline(line) {
-      if (this.irqCounter === 0 || this.irqReload) {
-        this.irqCounter = this.irqLatch;
-        this.irqReload = false;
-      } else {
-        this.irqCounter--;
-      }
-
-      if (this.irqCounter === 0 && this.irqEnabled) {
-        this.nes.cpu.irqRequested = true;
-      }
-    }
-  }
   // ===== Cartridge & Bus =====
   class Cartridge {
     constructor(bytes) {
