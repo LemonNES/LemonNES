@@ -534,151 +534,191 @@
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
-  class Mapper4 extends Mapper {
+    class Mapper4 extends Mapper {
     constructor(cart) {
-        super(cart); this.cpu = null; this.ppu = null;
-        this.bankSelect = 0; this.bankData = new Uint8Array(8); this.prgMode = 0; this.chrMode = 0;
-        this.irqLatch = 0; this.irqCounter = 0; this.irqEnable = false; this.irqReloadPending = false;
-        this.prgBanks = new Uint8Array(4); this.chrBanks = new Uint8Array(8);
-        this.prgBanksTotal = this.cart.prg.length / 0x2000; this.lastBank = this.prgBanksTotal - 1;
-        this.updatePrgMapping(); this.updateChrMapping();
+        super(cart); 
+        this.cpu = null; 
+        this.ppu = null;
+        
+        // Registers
+        this.bankSelect = 0; 
+        this.bankData = new Uint8Array(8); 
+        this.prgMode = 0; 
+        this.chrMode = 0;
+        
+        // IRQ State
+        this.irqLatch = 0; 
+        this.irqCounter = 0; 
+        this.irqEnable = false; 
+        this.irqReloadPending = false;
+        
+        // NEW: A12 Monitoring State
+        this.a12 = 0;          // Current state of PPU A12 line
+        this.lastRiseTime = 0; // Timestamp of last valid rising edge
+        
+        // Banking
+        this.prgBanks = new Uint8Array(4); 
+        this.chrBanks = new Uint8Array(8);
+        this.prgBanksTotal = this.cart.prg.length / 0x2000; 
+        this.lastBank = this.prgBanksTotal - 1;
+        this.updatePrgMapping(); 
+        this.updateChrMapping();
     }
-    ppuCycle() {
-        if (!this.ppu) return;
-        const renderingEnabled = (this.ppu.mask & 0x18) !== 0; if (!renderingEnabled) return;
-        const scanline = this.ppu.scanline; const cycle = this.ppu.cycle;
-        if (cycle === 260 && scanline >= 0 && scanline <= 239) { 
-          // Log PPU activity before clocking counter
-          if (Debugger.enabled) {
-            const addr = this.ppu.v & 0x3FFF;
-            const a12 = (addr >> 12) & 1;
-            Debugger.log(`[PPU] scanline=${scanline} dot=${cycle} addr=$${addr.toString(16).toUpperCase().padStart(4,'0')} A12=${a12}`);
-          }
-          this.clockCounter(); 
+
+    /**
+     * Monitor the PPU Address Bus for A12 transitions (Bit 12).
+     * This is the hardware-accurate way MMC3 counts scanlines.
+     */
+    checkA12(addr) {
+        // A12 is bit 12 (0x1000). 
+        // 0 -> Pattern Table 0 ($0000-$0FFF)
+        // 1 -> Pattern Table 1 ($1000-$1FFF)
+        const newA12 = (addr >> 12) & 1;
+
+        // Detect Rising Edge (0 -> 1)
+        if (newA12 === 1 && this.a12 === 0) {
+            // Get current time (approximate PPU cycle count for filtering)
+            // PPU scanlines are 0-261, dots are 0-340.
+            const now = this.ppu ? (this.ppu.scanline * 341 + this.ppu.cycle) : 0;
+            const diff = now - this.lastRiseTime;
+
+            // 16-Cycle Rule (Filter Noise):
+            // Only clock the counter if A12 has been low for a while (approx 16 dots).
+            // This filters out the rapid 0->1->0 toggles that happen *during* sprite fetches.
+            // (diff < 0 handles frame wrapping safely)
+            if (diff > 16 || diff < 0) {
+                this.clockCounter();
+                this.lastRiseTime = now;
+            }
         }
+        
+        this.a12 = newA12;
     }
+
+    // Deprecated: Do not clock on scanline timing anymore.
+    ppuCycle() {
+        // No-op. Bus monitoring in chrRead/chrWrite handles timing now.
+    }
+
     clockCounter() {
         if (Debugger.enabled) {
-          Debugger.log(`[MMC3] clockCounter called: counter=${this.irqCounter} latch=${this.irqLatch} reloadPending=${this.irqReloadPending} enable=${this.irqEnable}`);
+          Debugger.log(`[MMC3] clockCounter: Cnt=${this.irqCounter} Latch=${this.irqLatch} Reload=${this.irqReloadPending}`);
         }
-        if (this.irqReloadPending) { 
+        
+        if (this.irqCounter === 0 || this.irqReloadPending) { 
           this.irqCounter = this.irqLatch; 
           this.irqReloadPending = false; 
-          if (Debugger.enabled) {
-            Debugger.log(`[MMC3] IRQ counter reloaded -> ${this.irqCounter}`);
-          }
-          return; 
-        }
-        if (this.irqCounter === 0) { 
-          this.irqCounter = this.irqLatch; 
-          if (Debugger.enabled) {
-            Debugger.log(`[MMC3] IRQ counter was 0, reloaded from latch -> ${this.irqCounter}`);
-          }
         } else { 
           this.irqCounter--; 
-          if (Debugger.enabled) {
-            Debugger.log(`[MMC3] IRQ counter decremented -> ${this.irqCounter}`);
-          }
         }
+
         if (this.irqCounter === 0 && this.irqEnable && this.cpu) { 
           this.cpu.irqLine = true; 
-          if (Debugger.enabled) {
-            Debugger.log(`[MMC3] IRQ FIRED (counter=0, enabled=true)`);
-          }
+          if (Debugger.enabled) Debugger.log(`[MMC3] IRQ FIRED`);
         }
     }
+
     prgRead(addr) {
         if (addr >= 0x6000 && addr <= 0x7FFF) { return this.cart.sram[addr - 0x6000]; }
-        let bankIdx = (addr - 0x8000) >> 13; let bank = this.prgBanks[bankIdx];
+        let bankIdx = (addr - 0x8000) >> 13; 
+        let bank = this.prgBanks[bankIdx];
         return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
     }
+
     prgWrite(addr, val) {
         if (addr >= 0x6000 && addr <= 0x7FFF) { this.cart.sram[addr - 0x6000] = val; return; }
         this.writeRegister(addr, val);
     }
+
     chrRead(addr) {
-        let index = addr >> 10; let offset = addr & 0x3FF;
+        // Monitor A12 before reading
+        this.checkA12(addr);
+
+        let index = addr >> 10; 
+        let offset = addr & 0x3FF;
         let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
-        let bank = this.chrBanks[bankIndex]; const total = this.cart.chr.length >> 10; if (total > 0) bank %= total;
+        let bank = this.chrBanks[bankIndex]; 
+        const total = this.cart.chr.length >> 10; 
+        if (total > 0) bank %= total;
         return this.cart.chr[(bank * 1024) + offset];
     }
+
     chrWrite(addr, val) {
+        // Monitor A12 before writing
+        this.checkA12(addr);
+
         if (this.cart.chrROM) return;
-        let index = addr >> 10; let offset = addr & 0x3FF;
+        let index = addr >> 10; 
+        let offset = addr & 0x3FF;
         let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
-        let bank = this.chrBanks[bankIndex]; const total = this.cart.chr.length >> 10; if (total > 0) bank %= total;
+        let bank = this.chrBanks[bankIndex]; 
+        const total = this.cart.chr.length >> 10; 
+        if (total > 0) bank %= total;
         this.cart.chr[(bank * 1024) + offset] = val;
     }
+
     writeRegister(addr, val) {
         if (addr < 0x8000) return;
-        const addrRange = addr < 0xA000 ? '8000-9FFF' : addr < 0xC000 ? 'A000-BFFF' : addr < 0xE000 ? 'C000-DFFF' : 'E000-FFFF';
         
         if ((addr & 1) === 0) {
+            // Even registers
             if (addr < 0xA000) {
-                this.bankSelect = val; const p = (val >> 6) & 1, c = (val >> 7) & 1;
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (bank select, prg_mode=${p}, chr_mode=${c})`);
-                }
+                // Bank Select ($8000)
+                this.bankSelect = val; 
+                const p = (val >> 6) & 1, c = (val >> 7) & 1;
                 if (this.prgMode !== p) { this.prgMode = p; this.updatePrgMapping(); }
                 if (this.chrMode !== c) { this.chrMode = c; this.updateChrMapping(); }
             } else if (addr < 0xC000) { 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (mirroring)`);
-                }
+                // Mirroring ($A000)
                 if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical'; 
-            } 
-            else if (addr < 0xE000) { 
+            } else if (addr < 0xE000) { 
+                // IRQ Latch ($C000)
                 this.irqLatch = val; 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (IRQ latch)`);
-                }
-            } 
-            else { 
+            } else { 
+                // IRQ Disable ($E000)
                 this.irqEnable = false; 
                 if (this.cpu) this.cpu.irqLine = false; 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (IRQ disable, IRQ line cleared)`);
-                }
             }
         } else {
+            // Odd registers
             if (addr < 0xA000) { 
+                // Bank Data ($8001)
                 this.bankData[this.bankSelect & 7] = val; 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (bank data[${this.bankSelect & 7}])`);
-                }
                 (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); 
-            }
-            else if (addr < 0xC000) { 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (PRG RAM protect)`);
-                }
-            }
-            else if (addr < 0xE000) { 
+            } else if (addr < 0xC000) { 
+                // PRG RAM Protect ($A001) - Ignored
+            } else if (addr < 0xE000) { 
+                // IRQ Reload ($C001)
                 this.irqCounter = 0; 
                 this.irqReloadPending = true; 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (IRQ reload, counter=0, reloadPending=true)`);
-                }
-            }
-            else { 
+            } else { 
+                // IRQ Enable ($E001)
                 this.irqEnable = true; 
-                if (Debugger.enabled) {
-                  Debugger.log(`[CPU] write $${addr.toString(16).toUpperCase().padStart(4,'0')} <= $${val.toString(16).toUpperCase().padStart(2,'0')} (IRQ enable)`);
-                }
             }
         }
     }
+
     updatePrgMapping() {
-        const b8 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1; const bC = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
-        this.prgBanks[0] = b8; this.prgBanks[1] = this.bankData[7]; this.prgBanks[2] = bC; this.prgBanks[3] = this.lastBank;
+        const b8 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1; 
+        const bC = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
+        this.prgBanks[0] = b8; 
+        this.prgBanks[1] = this.bankData[7]; 
+        this.prgBanks[2] = bC; 
+        this.prgBanks[3] = this.lastBank;
     }
+
     updateChrMapping() {
         const R = this.bankData;
-        this.chrBanks[0] = R[0] & 0xFE; this.chrBanks[1] = R[0] | 1; this.chrBanks[2] = R[1] & 0xFE; this.chrBanks[3] = R[1] | 1;
-        this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3]; this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
+        this.chrBanks[0] = R[0] & 0xFE; 
+        this.chrBanks[1] = R[0] | 1; 
+        this.chrBanks[2] = R[1] & 0xFE; 
+        this.chrBanks[3] = R[1] | 1;
+        this.chrBanks[4] = R[2]; 
+        this.chrBanks[5] = R[3]; 
+        this.chrBanks[6] = R[4]; 
+        this.chrBanks[7] = R[5];
     }
   }
-  
   // ===== Cartridge & Bus =====
   class Cartridge {
     constructor(bytes) {
