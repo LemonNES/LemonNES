@@ -533,241 +533,252 @@
     prgRead(addr){ return this.cart.prg[addr-0x8000]; }
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
-  }
-class Mapper4 extends Mapper { constructor(cart) { super(cart); this.cpu = null; this.ppu = null;
+  } class Mapper4 extends Mapper {
+  constructor(cart) {
+    super(cart);
+    this.cpu = null;
+    this.ppu = null;
 
-// Registers
-this.register = 0;      // Current register to write to ($8000)
-this.regs = new Uint8Array(8); // Internal registers R0-R7
-this.prgMode = 0;       // $8000 bit 6
-this.chrMode = 0;       // $8000 bit 7
+    // Registers
+    this.register = 0;      // Current register to write to ($8000)
+    this.regs = new Uint8Array(8); // Internal registers R0-R7
+    this.prgMode = 0;       // $8000 bit 6
+    this.chrMode = 0;       // $8000 bit 7
 
-// IRQ Hardware
-this.irqCounter = 0;
-this.irqLatch = 0;
-this.irqEnable = false;
-this.irqReload = false;
-
-// A12 detection / debounce
-// prevA12: last sampled A12 level (false = low, true = high)
-this.prevA12 = false;
-// Count of consecutive PPU cycles A12 has been low. MMC3 requires A12 be low
-// for at least 3 PPU cycles before accepting the next rising edge.
-this.a12LowCycles = 0;
-
-// Bank Cache
-this.prgBanks = new Uint8Array(4);
-this.chrBanks = new Uint8Array(8);
-
-// Initial State
-this.prgBanksTotal = Math.floor(this.cart.prg.length / 0x2000);
-this.updateBanks();
-
-
-}
-
-// — IRQ & Timing —
-
-ppuCycle() { // MMC3 IRQ clocks on A12 rising edge. // Prefer sampling the PPU address/bus A12; if the PPU doesn’t expose an address // property, fall back to the “dot 260 on visible/prerender” heuristic.
-
-if (!this.ppu) return;
-
-// MMC3 ignores early fake A12 pulses from the PPU during the pre-render and
-// the first visible scanline. This is necessary for games like Kirby's Adventure.
-// If we're in scanline 261 (pre-render) or 0/1, ignore A12 transitions.
-// In the PPU implementation used here: pre-render is 261; visible 0..239.
-// The requested quirk: ignore A12 edges during scanline 261 (pre-render)
-// and scanline 0 (first visible) — equivalently, ppu.scanline <= 1 after map's numbering.
-// In this codebase the pre-render is stored as 261; the user's requested behavior
-// was "Scanline 0 (pre-render) and Scanline 1" — adopt that by checking for <= 1
-// only when the PPU reports those line numbers; if your PPU uses 261 for pre-render,
-// keep compatibility: check both common forms.
-//
-// We'll interpret the request as: if the PPU is at scanline 261 (pre-render) or scanline 0 or 1,
-// ignore A12 edges. To be conservative, check <= 1 OR === 261.
-const sl = this.ppu.scanline;
-if (sl <= 1 || sl === 261) {
-  // Reset edge detector state so when we start counting again we require a proper low period.
-  this.prevA12 = false;
-  this.a12LowCycles = 0;
-  return;
-}
-
-// IRQs only tick if rendering is enabled
-const showBG = (this.ppu.mask & 0x08);
-const showSpr = (this.ppu.mask & 0x10);
-if (!showBG && !showSpr) return;
-
-const sampled = this._samplePpuA12();
-
-// If sampling failed (no numeric address exposed), use fallback heuristic (dot 260).
-if (sampled === null) {
-  // Fallback heuristic: dot 260 of visible/prerender lines.
-  const cyc = this.ppu.cycle;
-  if (cyc === 260 && (sl < 240 || sl === 261)) {
-    // treat the fallback as a valid rising edge only after we've ensured A12 was low
-    // for the required cycles: emulate by using the low-cycle counter and prevA12.
-    // Since we can't sample the bus, assume A12 was low for at least 3 cycles if we have observed
-    // at least 3 cycles of non-high state (we conservatively call clockIrq here).
-    // Note: fallback timing is coarse; we still delay IRQ delivery one CPU instruction boundary
-    // by setting cpu.requestIrq in clockIrq.
-    this.clockIrq();
-  }
-  return;
-}
-
-const currA12 = sampled;
-
-// Update low-cycle counter for debounce.
-if (!currA12) {
-  // A12 is low this cycle
-  this.a12LowCycles++;
-} else {
-  // keep a12LowCycles as-is for evaluation on rising edge
-}
-
-// Detect rising edge: previous low, current high, and A12 was low for >= 3 cycles
-if (!this.prevA12 && currA12) {
-  if (this.a12LowCycles >= 3) {
-    // Valid rising edge -> process IRQ clock
-    this.clockIrq();
-  }
-  // Reset low-cycle counter after evaluating a rising edge
-  this.a12LowCycles = 0;
-}
-
-// Maintain previous A12 state for next cycle
-this.prevA12 = currA12;
-
-// If we see a high level without it being a rising edge (prev was also high),
-// ensure a12LowCycles stays at 0
-if (currA12) this.a12LowCycles = 0;
-
-
-}
-
-_samplePpuA12() { // Try common PPU fields that might expose the current PPU bus/address. // Return true/false if a numeric address field is found; return null if none found. if (!this.ppu) return null;
-
-const tryNames = [
-  'address',
-  'vramAddress',
-  'v',
-  'vaddr',
-  'currentAddress',
-  'ppuAddress',
-  'cycleAddr'
-];
-
-for (let i = 0; i < tryNames.length; i++) {
-  const name = tryNames[i];
-  const val = this.ppu[name];
-  if (typeof val === 'number') {
-    return (val & 0x1000) !== 0;
-  }
-}
-
-// No numeric PPU address field found => cannot sample A12 directly.
-return null;
-
-
-}
-
-clockIrq() { // Correct MMC3 behavior: // - If irqReload is set, the counter is reloaded from the latch on the next //   valid rising A12 edge and irqReload is cleared. That reload should NOT be //   followed by a decrement on that same edge. // - If counter is zero, it reloads from latch (and does not decrement on that edge). if (this.irqReload || this.irqCounter === 0) { this.irqCounter = this.irqLatch; this.irqReload = false; } else { this.irqCounter–; }
-
-// When counter reaches zero and IRQs are enabled, request an IRQ.
-// Do NOT assert cpu.irqLine synchronously here; instead set cpu.requestIrq
-// which the CPU will convert into irqLine at the next instruction boundary.
-if (this.irqCounter === 0 && this.irqEnable) {
-  if (this.cpu) {
-    // Use requestIrq to delay the IRQ by one CPU instruction boundary — this
-    // helps match real MMC3 timing in fallback/edge cases (Kirby's HUD).
-    this.cpu.requestIrq = true;
-  }
-}
-
-
-}
-
-// — Memory Access —
-
-prgRead(addr) { // WRAM $6000-$7FFF if (addr >= 0x6000 && addr < 0x8000) { return this.cart.sram[addr - 0x6000]; }
-
-// PRG ROM $8000-$FFFF
-const bankIdx = (addr - 0x8000) >> 13; // 0..3
-const bankNum = this.prgBanks[bankIdx];
-return this.cart.prg[(bankNum * 0x2000) + (addr & 0x1FFF)];
-
-
-}
-
-prgWrite(addr, val) { // WRAM $6000-$7FFF if (addr >= 0x6000 && addr < 0x8000) { this.cart.sram[addr - 0x6000] = val; return; }
-
-// Registers $8000-$FFFF
-switch (addr & 0xE001) {
-  case 0x8000: // Bank Select
-    this.register = val & 7;
-    this.prgMode = (val >> 6) & 1;
-    this.chrMode = (val >> 7) & 1;
-    this.updateBanks();
-    break;
-  case 0x8001: // Bank Data
-    this.regs[this.register] = val;
-    this.updateBanks();
-    break;
-  case 0xA000: // Mirroring
-    if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
-    break;
-  case 0xA001: // PRG RAM Protect (Ignored)
-    break;
-  case 0xC000: // IRQ Latch
-    this.irqLatch = val;
-    break;
-  case 0xC001: // IRQ Reload
-    // Per MMC3: set reload flag; actual reload happens on next valid A12 rising edge.
-    this.irqReload = true;
-    break;
-  case 0xE000: // IRQ Disable / Acknowledge
+    // IRQ Hardware
+    this.irqCounter = 0;
+    this.irqLatch = 0;
     this.irqEnable = false;
-    if (this.cpu) this.cpu.irqLine = false;
-    break;
-  case 0xE001: // IRQ Enable
-    this.irqEnable = true;
-    break;
+    this.irqReload = false;
+
+    // A12 detection / debounce
+    // prevA12: last sampled A12 level (false = low, true = high)
+    this.prevA12 = false;
+    // Count of consecutive PPU cycles A12 has been low. MMC3 requires A12 to be low
+    // for at least 3 PPU cycles before accepting the next rising edge.
+    this.a12LowCycles = 0;
+
+    // Bank Cache
+    this.prgBanks = new Uint8Array(4);
+    this.chrBanks = new Uint8Array(8);
+
+    // Initial State
+    this.prgBanksTotal = Math.floor(this.cart.prg.length / 0x2000);
+    this.updateBanks();
+  }
+
+  // --- IRQ & Timing ---
+
+  ppuCycle() {
+    // MMC3 IRQ clocks on A12 rising edge.
+    // Prefer sampling the PPU address/bus A12; if the PPU doesn't expose an address
+    // property, fall back to the approximate "dot 260 on visible/prerender" heuristic.
+    if (!this.ppu) return;
+
+    // IRQs only tick if rendering is enabled
+    const showBG = (this.ppu.mask & 0x08);
+    const showSpr = (this.ppu.mask & 0x10);
+    if (!showBG && !showSpr) return;
+
+    const sampled = this._samplePpuA12();
+
+    // If sampling failed, use the fallback heuristic: dot 260 of visible/prerender lines.
+    if (sampled === null) {
+      const sl = this.ppu.scanline;
+      const cyc = this.ppu.cycle;
+      if (cyc === 260 && (sl < 240 || sl === 261)) {
+        // Fallback: assume a valid rising A12 event here
+        this.clockIrq();
+      }
+      return;
+    }
+
+    const currA12 = sampled;
+
+    // Update low-cycle counter for debounce.
+    if (!currA12) {
+      // A12 is low this cycle
+      this.a12LowCycles++;
+    } else {
+      // A12 is high now; keep a12LowCycles as-is for evaluation on rising edge,
+      // then reset it after.
+    }
+
+    // Detect rising edge: previous low, current high, and A12 was low for >= 3 cycles
+    if (!this.prevA12 && currA12) {
+      if (this.a12LowCycles >= 3) {
+        // Valid rising edge -> process IRQ clock
+        this.clockIrq();
+      }
+      // After evaluating a rising edge, reset the low-cycle counter
+      this.a12LowCycles = 0;
+    }
+
+    // Maintain previous A12 state for next cycle
+    this.prevA12 = currA12;
+
+    // If we see a high level without it being a rising edge (prev was also high),
+    // ensure a12LowCycles stays at 0
+    if (currA12) this.a12LowCycles = 0;
+  }
+
+  _samplePpuA12() {
+    // Try common PPU fields that might expose the current PPU bus/address.
+    // Return true/false if a numeric address field is found; return null if none found.
+    if (!this.ppu) return null;
+
+    const tryNames = [
+      'address',
+      'vramAddress',
+      'v',
+      'vaddr',
+      'currentAddress',
+      'ppuAddress',
+      'cycleAddr'
+    ];
+
+    for (let i = 0; i < tryNames.length; i++) {
+      const name = tryNames[i];
+      const val = this.ppu[name];
+      if (typeof val === 'number') {
+        return (val & 0x1000) !== 0;
+      }
+    }
+
+    // No numeric PPU address field found => cannot sample A12 directly.
+    return null;
+  }
+
+  clockIrq() {
+    // Correct MMC3 behavior:
+    // - If irqReload is set, the counter is reloaded from the latch on the next
+    //   rising A12 edge and irqReload is cleared. That reload should NOT be
+    //   followed by a decrement on the same edge.
+    // - If counter is zero, it reloads from latch (and does not decrement on that edge).
+    if (this.irqReload || this.irqCounter === 0) {
+      this.irqCounter = this.irqLatch;
+      this.irqReload = false;
+    } else {
+      this.irqCounter--;
+    }
+
+    if (this.irqCounter === 0 && this.irqEnable) {
+      if (this.cpu) this.cpu.irqLine = true;
+    }
+  }
+
+  // --- Memory Access ---
+
+  prgRead(addr) {
+    // WRAM $6000-$7FFF
+    if (addr >= 0x6000 && addr < 0x8000) {
+      return this.cart.sram[addr - 0x6000];
+    }
+
+    // PRG ROM $8000-$FFFF
+    const bankIdx = (addr - 0x8000) >> 13; // 0..3
+    const bankNum = this.prgBanks[bankIdx];
+    return this.cart.prg[(bankNum * 0x2000) + (addr & 0x1FFF)];
+  }
+
+  prgWrite(addr, val) {
+    // WRAM $6000-$7FFF
+    if (addr >= 0x6000 && addr < 0x8000) {
+      this.cart.sram[addr - 0x6000] = val;
+      return;
+    }
+
+    // Registers $8000-$FFFF
+    switch (addr & 0xE001) {
+      case 0x8000: // Bank Select
+        this.register = val & 7;
+        this.prgMode = (val >> 6) & 1;
+        this.chrMode = (val >> 7) & 1;
+        this.updateBanks();
+        break;
+      case 0x8001: // Bank Data
+        this.regs[this.register] = val;
+        this.updateBanks();
+        break;
+      case 0xA000: // Mirroring
+        if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
+        break;
+      case 0xA001: // PRG RAM Protect (Ignored)
+        break;
+      case 0xC000: // IRQ Latch
+        this.irqLatch = val;
+        break;
+      case 0xC001: // IRQ Reload
+        // Per MMC3: set reload flag; actual reload happens on next valid A12 rising edge.
+        this.irqReload = true;
+        break;
+      case 0xE000: // IRQ Disable / Acknowledge
+        this.irqEnable = false;
+        if (this.cpu) this.cpu.irqLine = false;
+        break;
+      case 0xE001: // IRQ Enable
+        this.irqEnable = true;
+        break;
+    }
+  }
+
+  chrRead(addr) {
+    const bankIdx = addr >> 10;
+    const bankNum = this.chrBanks[bankIdx];
+    const totalChr = this.cart.chr.length >> 10;
+    // Handle ROM wrapping/sizing safely
+    const finalBank = totalChr > 0 ? (bankNum % totalChr) : bankNum;
+    return this.cart.chr[(finalBank * 1024) + (addr & 0x3FF)];
+  }
+
+  chrWrite(addr, val) {
+    if (this.cart.chrRAM) {
+      const bankIdx = addr >> 10;
+      const bankNum = this.chrBanks[bankIdx];
+      // 8KB CHR RAM is standard if no ROM
+      this.cart.chr[(bankNum * 1024) + (addr & 0x3FF)] = val;
+    }
+  }
+
+  updateBanks() {
+    // PRG Banking
+    const last = this.prgBanksTotal - 1;
+    if (this.prgMode === 0) {
+      this.prgBanks[0] = this.regs[6];
+      this.prgBanks[1] = this.regs[7];
+      this.prgBanks[2] = last - 1;
+      this.prgBanks[3] = last;
+    } else {
+      this.prgBanks[0] = last - 1;
+      this.prgBanks[1] = this.regs[7];
+      this.prgBanks[2] = this.regs[6];
+      this.prgBanks[3] = last;
+    }
+
+    // CHR Banking
+    // R0, R1 are 2KB banks; R2-R5 are 1KB banks
+    if (this.chrMode === 0) {
+      this.chrBanks[0] = this.regs[0] & 0xFE;
+      this.chrBanks[1] = this.regs[0] | 1;
+      this.chrBanks[2] = this.regs[1] & 0xFE;
+      this.chrBanks[3] = this.regs[1] | 1;
+      this.chrBanks[4] = this.regs[2];
+      this.chrBanks[5] = this.regs[3];
+      this.chrBanks[6] = this.regs[4];
+      this.chrBanks[7] = this.regs[5];
+    } else {
+      this.chrBanks[0] = this.regs[2];
+      this.chrBanks[1] = this.regs[3];
+      this.chrBanks[2] = this.regs[4];
+      this.chrBanks[3] = this.regs[5];
+      this.chrBanks[4] = this.regs[0] & 0xFE;
+      this.chrBanks[5] = this.regs[0] | 1;
+      this.chrBanks[6] = this.regs[1] & 0xFE;
+      this.chrBanks[7] = this.regs[1] | 1;
+    }
+  }
 }
 
-
-}
-
-chrRead(addr) { const bankIdx = addr >> 10; const bankNum = this.chrBanks[bankIdx]; const totalChr = this.cart.chr.length >> 10; // Handle ROM wrapping/sizing safely const finalBank = totalChr > 0 ? (bankNum % totalChr) : bankNum; return this.cart.chr[(finalBank * 1024) + (addr & 0x3FF)]; }
-
-chrWrite(addr, val) { if (this.cart.chrRAM) { const bankIdx = addr >> 10; const bankNum = this.chrBanks[bankIdx]; // 8KB CHR RAM is standard if no ROM this.cart.chr[(bankNum * 1024) + (addr & 0x3FF)] = val; } }
-
-updateBanks() { // PRG Banking const last = this.prgBanksTotal - 1; if (this.prgMode === 0) { this.prgBanks[0] = this.regs[6]; this.prgBanks[1] = this.regs[7]; this.prgBanks[2] = last - 1; this.prgBanks[3] = last; } else { this.prgBanks[0] = last - 1; this.prgBanks[1] = this.regs[7]; this.prgBanks[2] = this.regs[6]; this.prgBanks[3] = last; }
-
-// CHR Banking
-// R0, R1 are 2KB banks; R2-R5 are 1KB banks
-if (this.chrMode === 0) {
-  this.chrBanks[0] = this.regs[0] & 0xFE;
-  this.chrBanks[1] = this.regs[0] | 1;
-  this.chrBanks[2] = this.regs[1] & 0xFE;
-  this.chrBanks[3] = this.regs[1] | 1;
-  this.chrBanks[4] = this.regs[2];
-  this.chrBanks[5] = this.regs[3];
-  this.chrBanks[6] = this.regs[4];
-  this.chrBanks[7] = this.regs[5];
-} else {
-  this.chrBanks[0] = this.regs[2];
-  this.chrBanks[1] = this.regs[3];
-  this.chrBanks[2] = this.regs[4];
-  this.chrBanks[3] = this.regs[5];
-  this.chrBanks[4] = this.regs[0] & 0xFE;
-  this.chrBanks[5] = this.regs[0] | 1;
-  this.chrBanks[6] = this.regs[1] & 0xFE;
-  this.chrBanks[7] = this.regs[1] | 1;
-}
-
-
-} } 
   
   // ===== Cartridge & Bus =====
   class Cartridge {
