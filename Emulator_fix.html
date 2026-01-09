@@ -534,177 +534,207 @@
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
-      class Mapper4 extends Mapper {
-    constructor(cart) {
-      super(cart);
-      this.cpu = null;
-      this.ppu = null;
+   class Mapper4 extends Mapper { constructor(cart) { super(cart); this.cpu = null; this.ppu = null;
 
-      // Registers
-      this.register = 0;      // Current register to write to ($8000)
-      this.regs = new Uint8Array(8); // Internal registers R0-R7
-      this.prgMode = 0;       // $8000 bit 6
-      this.chrMode = 0;       // $8000 bit 7
-      
-      // IRQ Hardware
-      this.irqCounter = 0;
-      this.irqLatch = 0;
-      this.irqEnable = false;
-      this.irqReload = false;
+  // Registers
+  this.register = 0;      // Current register to write to ($8000)
+  this.regs = new Uint8Array(8); // Internal registers R0-R7
+  this.prgMode = 0;       // $8000 bit 6
+  this.chrMode = 0;       // $8000 bit 7
+  
+  // IRQ Hardware
+  this.irqCounter = 0;
+  this.irqLatch = 0;
+  this.irqEnable = false;
+  this.irqReload = false;
 
-      // Bank Cache
-      this.prgBanks = new Uint8Array(4);
-      this.chrBanks = new Uint8Array(8);
-      
-      // Initial State
-      this.prgBanksTotal = Math.floor(this.cart.prg.length / 0x2000);
-      this.updateBanks();
-    }
+  // Track previous A12 to detect rising edges correctly
+  this.prevA12 = false;
 
-    // --- IRQ & Timing ---
-    
-    ppuCycle() {
-      // MMC3 IRQ clocks on A12 rising edge.
-      // In a scanline renderer, this effectively happens at dot 260
-      // of visible lines and the pre-render line.
-      if (!this.ppu) return;
+  // Bank Cache
+  this.prgBanks = new Uint8Array(4);
+  this.chrBanks = new Uint8Array(8);
+  
+  // Initial State
+  this.prgBanksTotal = Math.floor(this.cart.prg.length / 0x2000);
+  this.updateBanks();
+}
 
-      // IRQs only tick if rendering is enabled
-      const showBG = (this.ppu.mask & 0x08);
-      const showSpr = (this.ppu.mask & 0x10);
-      if (!showBG && !showSpr) return;
+// --- IRQ & Timing ---
 
-      const sl = this.ppu.scanline;
-      const cyc = this.ppu.cycle;
+ppuCycle() {
+  // MMC3 IRQ clocks on A12 rising edge.
+  // Prefer sampling the PPU address/bus A12; if the PPU doesn't expose an address
+  // property, fall back to the approximate "dot 260 on visible/prerender" heuristic.
+  if (!this.ppu) return;
 
-      // Visible lines (0-239) and Pre-render (261)
-      if (cyc === 260 && (sl < 240 || sl === 261)) {
-        this.clockIrq();
-      }
-    }
+  // IRQs only tick if rendering is enabled
+  const showBG = (this.ppu.mask & 0x08);
+  const showSpr = (this.ppu.mask & 0x10);
+  if (!showBG && !showSpr) return;
 
-    clockIrq() {
-      if (this.irqCounter === 0 || this.irqReload) {
-        this.irqCounter = this.irqLatch;
-        this.irqReload = false;
-      } else {
-        this.irqCounter--;
-        if (this.irqCounter === 0 && this.irqEnable) {
-          if (this.cpu) this.cpu.irqLine = true;
-        }
-      }
-    }
+  const currA12 = this._samplePpuA12();
 
-    // --- Memory Access ---
+  // Detect rising edge: previous low, current high.
+  if (!this.prevA12 && currA12) {
+    this.clockIrq();
+  }
 
-    prgRead(addr) {
-      // WRAM $6000-$7FFF
-      if (addr >= 0x6000 && addr < 0x8000) {
-        return this.cart.sram[addr - 0x6000];
-      }
-      
-      // PRG ROM $8000-$FFFF
-      const bankIdx = (addr - 0x8000) >> 13; // 0..3
-      const bankNum = this.prgBanks[bankIdx];
-      return this.cart.prg[(bankNum * 0x2000) + (addr & 0x1FFF)];
-    }
+  this.prevA12 = currA12;
+}
 
-    prgWrite(addr, val) {
-      // WRAM $6000-$7FFF
-      if (addr >= 0x6000 && addr < 0x8000) {
-        this.cart.sram[addr - 0x6000] = val;
-        return;
-      }
+_samplePpuA12() {
+  // Try common PPU fields that might expose the current PPU bus/address.
+  // Many PPU implementations expose a numeric 'address' or 'vramAddress' (or similar).
+  if (!this.ppu) return false;
 
-      // Registers $8000-$FFFF
-      switch (addr & 0xE001) {
-        case 0x8000: // Bank Select
-          this.register = val & 7;
-          this.prgMode = (val >> 6) & 1;
-          this.chrMode = (val >> 7) & 1;
-          this.updateBanks();
-          break;
-        case 0x8001: // Bank Data
-          this.regs[this.register] = val;
-          this.updateBanks();
-          break;
-        case 0xA000: // Mirroring
-          if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
-          break;
-        case 0xA001: // PRG RAM Protect (Ignored)
-          break;
-        case 0xC000: // IRQ Latch
-          this.irqLatch = val;
-          break;
-        case 0xC001: // IRQ Reload
-          this.irqReload = true;
-          break;
-        case 0xE000: // IRQ Disable / Acknowledge
-          this.irqEnable = false;
-          if (this.cpu) this.cpu.irqLine = false;
-          break;
-        case 0xE001: // IRQ Enable
-          this.irqEnable = true;
-          break;
-      }
-    }
+  const tryNames = [
+    'address',
+    'vramAddress',
+    'v',
+    'vaddr',
+    'currentAddress',
+    'ppuAddress',
+    'cycleAddr'
+  ];
 
-    chrRead(addr) {
-      const bankIdx = addr >> 10;
-      const bankNum = this.chrBanks[bankIdx];
-      const totalChr = this.cart.chr.length >> 10;
-      // Handle ROM wrapping/sizing safely
-      const finalBank = totalChr > 0 ? (bankNum % totalChr) : bankNum;
-      return this.cart.chr[(finalBank * 1024) + (addr & 0x3FF)];
-    }
-
-    chrWrite(addr, val) {
-      if (this.cart.chrRAM) {
-        const bankIdx = addr >> 10;
-        const bankNum = this.chrBanks[bankIdx];
-        // 8KB CHR RAM is standard if no ROM
-        this.cart.chr[(bankNum * 1024) + (addr & 0x3FF)] = val;
-      }
-    }
-
-    updateBanks() {
-      // PRG Banking
-      const last = this.prgBanksTotal - 1;
-      if (this.prgMode === 0) {
-        this.prgBanks[0] = this.regs[6];
-        this.prgBanks[1] = this.regs[7];
-        this.prgBanks[2] = last - 1;
-        this.prgBanks[3] = last;
-      } else {
-        this.prgBanks[0] = last - 1;
-        this.prgBanks[1] = this.regs[7];
-        this.prgBanks[2] = this.regs[6];
-        this.prgBanks[3] = last;
-      }
-
-      // CHR Banking
-      // R0, R1 are 2KB banks; R2-R5 are 1KB banks
-      if (this.chrMode === 0) {
-        this.chrBanks[0] = this.regs[0] & 0xFE;
-        this.chrBanks[1] = this.regs[0] | 1;
-        this.chrBanks[2] = this.regs[1] & 0xFE;
-        this.chrBanks[3] = this.regs[1] | 1;
-        this.chrBanks[4] = this.regs[2];
-        this.chrBanks[5] = this.regs[3];
-        this.chrBanks[6] = this.regs[4];
-        this.chrBanks[7] = this.regs[5];
-      } else {
-        this.chrBanks[0] = this.regs[2];
-        this.chrBanks[1] = this.regs[3];
-        this.chrBanks[2] = this.regs[4];
-        this.chrBanks[3] = this.regs[5];
-        this.chrBanks[4] = this.regs[0] & 0xFE;
-        this.chrBanks[5] = this.regs[0] | 1;
-        this.chrBanks[6] = this.regs[1] & 0xFE;
-        this.chrBanks[7] = this.regs[1] | 1;
-      }
+  for (let i = 0; i < tryNames.length; i++) {
+    const name = tryNames[i];
+    const val = this.ppu[name];
+    if (typeof val === 'number') {
+      return (val & 0x1000) !== 0;
     }
   }
+
+  // Fallback heuristic: A12 rising edge typically occurs at dot 260 on visible
+  // and pre-render scanlines in many scanline renderers. Use that as a last resort.
+  const sl = this.ppu.scanline;
+  const cyc = this.ppu.cycle;
+  return (cyc === 260 && (sl < 240 || sl === 261));
+}
+
+clockIrq() {
+  if (this.irqCounter === 0 || this.irqReload) {
+    this.irqCounter = this.irqLatch;
+    this.irqReload = false;
+  } else {
+    this.irqCounter--;
+    if (this.irqCounter === 0 && this.irqEnable) {
+      if (this.cpu) this.cpu.irqLine = true;
+    }
+  }
+}
+
+// --- Memory Access ---
+
+prgRead(addr) {
+  // WRAM $6000-$7FFF
+  if (addr >= 0x6000 && addr < 0x8000) {
+    return this.cart.sram[addr - 0x6000];
+  }
+  
+  // PRG ROM $8000-$FFFF
+  const bankIdx = (addr - 0x8000) >> 13; // 0..3
+  const bankNum = this.prgBanks[bankIdx];
+  return this.cart.prg[(bankNum * 0x2000) + (addr & 0x1FFF)];
+}
+
+prgWrite(addr, val) {
+  // WRAM $6000-$7FFF
+  if (addr >= 0x6000 && addr < 0x8000) {
+    this.cart.sram[addr - 0x6000] = val;
+    return;
+  }
+
+  // Registers $8000-$FFFF
+  switch (addr & 0xE001) {
+    case 0x8000: // Bank Select
+      this.register = val & 7;
+      this.prgMode = (val >> 6) & 1;
+      this.chrMode = (val >> 7) & 1;
+      this.updateBanks();
+      break;
+    case 0x8001: // Bank Data
+      this.regs[this.register] = val;
+      this.updateBanks();
+      break;
+    case 0xA000: // Mirroring
+      if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical';
+      break;
+    case 0xA001: // PRG RAM Protect (Ignored)
+      break;
+    case 0xC000: // IRQ Latch
+      this.irqLatch = val;
+      break;
+    case 0xC001: // IRQ Reload
+      this.irqReload = true;
+      break;
+    case 0xE000: // IRQ Disable / Acknowledge
+      this.irqEnable = false;
+      if (this.cpu) this.cpu.irqLine = false;
+      break;
+    case 0xE001: // IRQ Enable
+      this.irqEnable = true;
+      break;
+  }
+}
+
+chrRead(addr) {
+  const bankIdx = addr >> 10;
+  const bankNum = this.chrBanks[bankIdx];
+  const totalChr = this.cart.chr.length >> 10;
+  // Handle ROM wrapping/sizing safely
+  const finalBank = totalChr > 0 ? (bankNum % totalChr) : bankNum;
+  return this.cart.chr[(finalBank * 1024) + (addr & 0x3FF)];
+}
+
+chrWrite(addr, val) {
+  if (this.cart.chrRAM) {
+    const bankIdx = addr >> 10;
+    const bankNum = this.chrBanks[bankIdx];
+    // 8KB CHR RAM is standard if no ROM
+    this.cart.chr[(bankNum * 1024) + (addr & 0x3FF)] = val;
+  }
+}
+
+updateBanks() {
+  // PRG Banking
+  const last = this.prgBanksTotal - 1;
+  if (this.prgMode === 0) {
+    this.prgBanks[0] = this.regs[6];
+    this.prgBanks[1] = this.regs[7];
+    this.prgBanks[2] = last - 1;
+    this.prgBanks[3] = last;
+  } else {
+    this.prgBanks[0] = last - 1;
+    this.prgBanks[1] = this.regs[7];
+    this.prgBanks[2] = this.regs[6];
+    this.prgBanks[3] = last;
+  }
+
+  // CHR Banking
+  // R0, R1 are 2KB banks; R2-R5 are 1KB banks
+  if (this.chrMode === 0) {
+    this.chrBanks[0] = this.regs[0] & 0xFE;
+    this.chrBanks[1] = this.regs[0] | 1;
+    this.chrBanks[2] = this.regs[1] & 0xFE;
+    this.chrBanks[3] = this.regs[1] | 1;
+    this.chrBanks[4] = this.regs[2];
+    this.chrBanks[5] = this.regs[3];
+    this.chrBanks[6] = this.regs[4];
+    this.chrBanks[7] = this.regs[5];
+  } else {
+    this.chrBanks[0] = this.regs[2];
+    this.chrBanks[1] = this.regs[3];
+    this.chrBanks[2] = this.regs[4];
+    this.chrBanks[3] = this.regs[5];
+    this.chrBanks[4] = this.regs[0] & 0xFE;
+    this.chrBanks[5] = this.regs[0] | 1;
+    this.chrBanks[6] = this.regs[1] & 0xFE;
+    this.chrBanks[7] = this.regs[1] | 1;
+  }
+}                       
+}       
   // ===== Cartridge & Bus =====
   class Cartridge {
     constructor(bytes) {
