@@ -649,23 +649,20 @@
     return null;
   }
 
-  clockIrq() {
-    // Correct MMC3 behavior:
-    // - If irqReload is set, the counter is reloaded from the latch on the next
-    //   rising A12 edge and irqReload is cleared. That reload should NOT be
-    //   followed by a decrement on the same edge.
-    // - If counter is zero, it reloads from latch (and does not decrement on that edge).
-    if (this.irqReload || this.irqCounter === 0) {
-      this.irqCounter = this.irqLatch;
-      this.irqReload = false;
-    } else {
-      this.irqCounter--;
-    }
-
-    if (this.irqCounter === 0 && this.irqEnable) {
-      if (this.cpu) this.cpu.irqLine = true;
-    }
+  clockIRQ() {
+  if (this.irqReload) {
+    this.irqCounter = this.irqLatch;
+    this.irqReload = false;
+  } else if (this.irqCounter === 0) {
+    this.irqCounter = this.irqLatch;
+  } else {
+    this.irqCounter--;
   }
+  
+  if (this.irqCounter === 0 && this.irqEnable) {
+    this.requestIRQ();
+  }
+}
 
   // --- Memory Access ---
 
