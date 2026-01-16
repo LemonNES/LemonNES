@@ -569,7 +569,7 @@
             } 
             else if (addr < 0xC000) { 
                 // Restore Mirroring Logic: 0=Vertical, 1=Horizontal
-                if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical'; 
+                if (this.ppu) this.ppu.mirror = (val & 1) ? 'vertical' : 'horizontal'; 
             } 
             else if (addr < 0xE000) { 
                 this.irqLatch = val; 
