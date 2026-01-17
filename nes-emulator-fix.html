@@ -603,9 +603,7 @@
         this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3]; this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
     }
   }
-
-  
-  // ===== Cartridge & Bus =====
+// ===== Cartridge & Bus =====
   class Cartridge {
     constructor(bytes) {
       if (bytes[0] !== 0x4E || bytes[1] !== 0x45 || bytes[2] !== 0x53 || bytes[3] !== 0x1A) throw new Error('Invalid iNES ROM file');
@@ -616,6 +614,7 @@
       this.chrROM = chrBanks > 0;
       if (this.chrROM) { const chrSize = chrBanks * 8192; this.chr = bytes.slice(offset, offset + chrSize); } else { this.chr = new Uint8Array(8192); }
       this.chrRAM = !this.chrROM; this.sram = new Uint8Array(0x2000);
+      this.irqLine = false; // Hardware IRQ line
     }
   }
   class Bus {
