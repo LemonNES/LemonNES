@@ -494,41 +494,102 @@
     prgWrite(addr,val){ this.chrBank = val & 0x03; }
     chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
   }
-  class Mapper4 extends Mapper {
+   class Mapper4 extends Mapper {
     constructor(cart) {
-        super(cart); this.cpu = null; this.ppu = null;
-        this.bankSelect = 0; this.bankData = new Uint8Array(8); this.prgMode = 0; this.chrMode = 0;
-        this.irqLatch = 0; this.irqCounter = 0; this.irqEnable = false; this.irqReloadPending = false;
-        this.prgBanks = new Uint8Array(4); this.chrBanks = new Uint8Array(8);
-        this.prgBanksTotal = this.cart.prg.length / 0x2000; this.lastBank = this.prgBanksTotal - 1;
-        this.updatePrgMapping(); this.updateChrMapping();
+        super(cart); 
+        this.cpu = null; 
+        this.ppu = null;
+        this.bankSelect = 0; 
+        this.bankData = new Uint8Array(8); 
+        this.prgMode = 0; 
+        this.chrMode = 0;
+        
+        // IRQ State
+        this.irqLatch = 0; 
+        this.irqCounter = 0; 
+        this.irqEnable = false; 
+        this.irqReloadPending = false;
+        this.irqPending = false; // New: Level-sensitive IRQ flag
+        
+        // A12 Watcher State (Claude Patch)
+        this.a12Low = true; 
+        this.a12DebounceTimer = 0;
+
+        // Banking
+        this.prgBanks = new Uint8Array(4); 
+        this.chrBanks = new Uint8Array(8);
+        this.prgBanksTotal = this.cart.prg.length / 0x2000; 
+        this.lastBank = this.prgBanksTotal - 1;
+        
+        this.updatePrgMapping(); 
+        this.updateChrMapping();
     }
+
+    // New: Accurate A12-based PPU Cycle (Claude Patch)
     ppuCycle() {
         if (!this.ppu) return;
-        const renderingEnabled = (this.ppu.mask & 0x18) !== 0; if (!renderingEnabled) return;
-        const scanline = this.ppu.scanline; const cycle = this.ppu.cycle;
-        if (cycle === 260 && scanline >= 0 && scanline <= 239) { this.clockCounter(); }
+        const renderingEnabled = (this.ppu.mask & 0x18) !== 0; 
+        if (!renderingEnabled) return;
+        
+        // A12 debounce: decrement timer if active
+        if (this.a12DebounceTimer > 0) this.a12DebounceTimer--;
+        
+        // Detect A12 rising edge (PPU address bit 12)
+        const a12High = (this.ppu.v & 0x1000) !== 0;
+        
+        if (!this.a12Low && a12High) {
+            // A12 was low, now high - potential rising edge
+            if (this.a12DebounceTimer === 0) {
+                this.clockCounter();
+                this.a12DebounceTimer = 6; // Debounce for ~6 PPU cycles
+            }
+        }
+        this.a12Low = !a12High;
+        
+        // Maintain level-sensitive IRQ
+        if (this.irqPending && this.cpu) {
+            this.cpu.irqLine = true;
+        }
     }
+
+    // New: IRQ Counter Logic (Claude Patch)
     clockCounter() {
-        if (this.irqReloadPending) { this.irqCounter = this.irqLatch; this.irqReloadPending = false; return; }
-        if (this.irqCounter === 0) { this.irqCounter = this.irqLatch; } else { this.irqCounter--; }
-        if (this.irqCounter === 0 && this.irqEnable && this.cpu) { this.cpu.irqLine = true; }
+        if (this.irqReloadPending) { 
+            this.irqCounter = this.irqLatch; 
+            this.irqReloadPending = false; 
+            return; 
+        }
+        if (this.irqCounter === 0) { 
+            this.irqCounter = this.irqLatch; 
+        } else { 
+            this.irqCounter--; 
+        }
+        if (this.irqCounter === 0 && this.irqEnable) { 
+            this.irqPending = true; // Set level-sensitive flag
+            if (this.cpu) this.cpu.irqLine = true; 
+        }
     }
+
+    // --- Restored/Merged Data from Original File ---
+
     prgRead(addr) {
         if (addr >= 0x6000 && addr <= 0x7FFF) { return this.cart.sram[addr - 0x6000]; }
         let bankIdx = (addr - 0x8000) >> 13; let bank = this.prgBanks[bankIdx];
         return this.cart.prg[(bank * 0x2000) + (addr & 0x1FFF)];
     }
+
     prgWrite(addr, val) {
         if (addr >= 0x6000 && addr <= 0x7FFF) { this.cart.sram[addr - 0x6000] = val; return; }
         this.writeRegister(addr, val);
     }
+
     chrRead(addr) {
         let index = addr >> 10; let offset = addr & 0x3FF;
         let bankIndex = this.chrMode === 0 ? index : (index < 4 ? index + 4 : index - 4);
         let bank = this.chrBanks[bankIndex]; const total = this.cart.chr.length >> 10; if (total > 0) bank %= total;
         return this.cart.chr[(bank * 1024) + offset];
     }
+
     chrWrite(addr, val) {
         if (this.cart.chrROM) return;
         let index = addr >> 10; let offset = addr & 0x3FF;
@@ -536,33 +597,63 @@
         let bank = this.chrBanks[bankIndex]; const total = this.cart.chr.length >> 10; if (total > 0) bank %= total;
         this.cart.chr[(bank * 1024) + offset] = val;
     }
+
     writeRegister(addr, val) {
         if (addr < 0x8000) return;
-        if ((addr & 1) === 0) {
-            if (addr < 0xA000) {
-                this.bankSelect = val; const p = (val >> 6) & 1, c = (val >> 7) & 1;
+        if ((addr & 1) === 0) { // Even registers
+            if (addr < 0xA000) { // Bank Select ($8000-$9FFE even)
+                this.bankSelect = val; 
+                const p = (val >> 6) & 1, c = (val >> 7) & 1;
                 if (this.prgMode !== p) { this.prgMode = p; this.updatePrgMapping(); }
                 if (this.chrMode !== c) { this.chrMode = c; this.updateChrMapping(); }
-            } else if (addr < 0xC000) { if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical'; } 
-            else if (addr < 0xE000) { this.irqLatch = val; } 
-            else { this.irqEnable = false; if (this.cpu) this.cpu.irqLine = false; }
-        } else {
-            if (addr < 0xA000) { this.bankData[this.bankSelect & 7] = val; (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); }
-            else if (addr < 0xC000) { }
-            else if (addr < 0xE000) { this.irqCounter = 0; this.irqReloadPending = true; }
-            else { this.irqEnable = true; }
+            } 
+            else if (addr < 0xC000) { // Mirroring ($A000-$BFFE even)
+                if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical'; 
+            } 
+            else if (addr < 0xE000) { // IRQ Latch ($C000-$DFFE even)
+                this.irqLatch = val; 
+            } 
+            else { // IRQ Disable ($E000-$FFFE even)
+                this.irqEnable = false; 
+                this.irqPending = false; // Acknowledge pending IRQ
+                if (this.cpu) this.cpu.irqLine = false; 
+            }
+        } else { // Odd registers
+            if (addr < 0xA000) { // Bank Data ($8001-$9FFF odd)
+                this.bankData[this.bankSelect & 7] = val; 
+                (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); 
+            }
+            else if (addr < 0xC000) { // RAM Protect ($A001-$BFFF odd)
+                // Not implemented usually necessary
+            }
+            else if (addr < 0xE000) { // IRQ Reload ($C001-$DFFF odd)
+                this.irqCounter = 0; 
+                this.irqReloadPending = true; 
+            }
+            else { // IRQ Enable ($E001-$FFFF odd)
+                this.irqEnable = true; 
+            }
         }
     }
+
     updatePrgMapping() {
-        const b8 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1; const bC = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
-        this.prgBanks[0] = b8; this.prgBanks[1] = this.bankData[7]; this.prgBanks[2] = bC; this.prgBanks[3] = this.lastBank;
+        const b8 = this.prgMode === 0 ? this.bankData[6] : this.lastBank - 1; 
+        const bC = this.prgMode === 0 ? this.lastBank - 1 : this.bankData[6];
+        this.prgBanks[0] = b8; 
+        this.prgBanks[1] = this.bankData[7]; 
+        this.prgBanks[2] = bC; 
+        this.prgBanks[3] = this.lastBank;
     }
+
     updateChrMapping() {
         const R = this.bankData;
-        this.chrBanks[0] = R[0] & 0xFE; this.chrBanks[1] = R[0] | 1; this.chrBanks[2] = R[1] & 0xFE; this.chrBanks[3] = R[1] | 1;
-        this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3]; this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
+        this.chrBanks[0] = R[0] & 0xFE; this.chrBanks[1] = R[0] | 1; 
+        this.chrBanks[2] = R[1] & 0xFE; this.chrBanks[3] = R[1] | 1;
+        this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3]; 
+        this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
     }
   }
+
   
   // ===== Cartridge & Bus =====
   class Cartridge {
