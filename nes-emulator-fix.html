@@ -505,15 +505,39 @@
     }
     ppuCycle() {
         if (!this.ppu) return;
-        const renderingEnabled = (this.ppu.mask & 0x18) !== 0; if (!renderingEnabled) return;
-        const scanline = this.ppu.scanline; const cycle = this.ppu.cycle;
-        if (cycle === 260 && scanline >= 0 && scanline <= 239) { this.clockCounter(); }
+        // Optimization: Checking mask every cycle is slow, but necessary for accuracy.
+        // A12 toggles happen during rendering.
+        const renderingEnabled = (this.ppu.mask & 0x18) !== 0; 
+        if (!renderingEnabled) return;
+
+        const scanline = this.ppu.scanline; 
+        const cycle = this.ppu.cycle;
+
+        // FIX: MMC3 clocks on visible lines (0-239) AND pre-render line (261)
+        if (cycle === 260 && ((scanline >= 0 && scanline <= 239) || scanline === 261)) { 
+            this.clockCounter(); 
+        }
     }
     clockCounter() {
-        if (this.irqReloadPending) { this.irqCounter = this.irqLatch; this.irqReloadPending = false; return; }
-        if (this.irqCounter === 0) { this.irqCounter = this.irqLatch; } else { this.irqCounter--; }
-        if (this.irqCounter === 0 && this.irqEnable && this.cpu) { this.cpu.irqLine = true; }
+        // MMC3 IRQ Logic:
+        // 1. If counter is 0 OR reload is pending, reload with latch.
+        // 2. ELSE decrement counter.
+        // 3. If counter transitioned to 0 (meaning it WAS non-zero and became zero), fire IRQ.
+        
+        // Note: The previous logic had a subtle flaw where it checked == 0 twice in a way that
+        // could miss the transition or fire incorrectly depending on reload timing.
+        
+        if (this.irqCounter === 0 || this.irqReloadPending) {
+            this.irqCounter = this.irqLatch;
+            this.irqReloadPending = false;
+        } else {
+            this.irqCounter--;
+            if (this.irqCounter === 0 && this.irqEnable) {
+                if (this.cpu) this.cpu.irqLine = true;
+            }
+        }
     }
+    // ... (Rest of Mapper4 methods remain the same) ...
     prgRead(addr) {
         if (addr >= 0x6000 && addr <= 0x7FFF) { return this.cart.sram[addr - 0x6000]; }
         let bankIdx = (addr - 0x8000) >> 13; let bank = this.prgBanks[bankIdx];
@@ -538,6 +562,7 @@
     }
     writeRegister(addr, val) {
         if (addr < 0x8000) return;
+        // Even registers (A000, C000, E000)
         if ((addr & 1) === 0) {
             if (addr < 0xA000) {
                 this.bankSelect = val; const p = (val >> 6) & 1, c = (val >> 7) & 1;
@@ -545,12 +570,27 @@
                 if (this.chrMode !== c) { this.chrMode = c; this.updateChrMapping(); }
             } else if (addr < 0xC000) { if (this.ppu) this.ppu.mirror = (val & 1) ? 'horizontal' : 'vertical'; } 
             else if (addr < 0xE000) { this.irqLatch = val; } 
-            else { this.irqEnable = false; if (this.cpu) this.cpu.irqLine = false; }
+            else { 
+                // Disable IRQ ($E000)
+                this.irqEnable = false; 
+                if (this.cpu) this.cpu.irqLine = false; 
+            }
         } else {
-            if (addr < 0xA000) { this.bankData[this.bankSelect & 7] = val; (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); }
-            else if (addr < 0xC000) { }
-            else if (addr < 0xE000) { this.irqCounter = 0; this.irqReloadPending = true; }
-            else { this.irqEnable = true; }
+            // Odd registers (8001, A001, C001, E001)
+            if (addr < 0xA000) { 
+                this.bankData[this.bankSelect & 7] = val; 
+                (this.bankSelect & 7) >= 6 ? this.updatePrgMapping() : this.updateChrMapping(); 
+            }
+            else if (addr < 0xC000) { /* PRG RAM protect, usually ignored */ }
+            else if (addr < 0xE000) { 
+                // Reload IRQ ($C001)
+                this.irqCounter = 0; 
+                this.irqReloadPending = true; 
+            }
+            else { 
+                // Enable IRQ ($E001)
+                this.irqEnable = true; 
+            }
         }
     }
     updatePrgMapping() {
@@ -563,6 +603,7 @@
         this.chrBanks[4] = R[2]; this.chrBanks[5] = R[3]; this.chrBanks[6] = R[4]; this.chrBanks[7] = R[5];
     }
   }
+
   
   // ===== Cartridge & Bus =====
   class Cartridge {
