@@ -38,7 +38,7 @@ The Following Games Have Been Tested With LemonNES
 LemonNES Is Currently In Beta, If You Find Any Issues With The Code, Please Report Them By Creating A Pull Request.
 
 # Testing 
-To Test A Working Version Of LemonNES, Visit https://lemonnes.github.io/LemonNES/test3
+To Test A Working Version Of LemonNES, Visit https://lemonnes.github.io/LemonNES
 
 # Disclaimer
 LemonNES should NEVER be used to run pirated content. Please Legally Obtain Games! You Can Find Free Homebrew Games Online. 
