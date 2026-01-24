@@ -483,17 +483,69 @@
     chrRead(addr){ const mode = (this.ctrl>>4)&1; if(mode===0){ const base=(this.chrBank0&0x1E)*0x1000; return this.cart.chr[base + addr]; } else { const base = (addr<0x1000? this.chrBank0: this.chrBank1)*0x1000; return this.cart.chr[base + (addr&0x0FFF)]; } }
     chrWrite(addr,val){ if(this.cart.chrRAM){ const mode=(this.ctrl>>4)&1; if(mode===0){ const base=(this.chrBank0&0x1E)*0x1000; this.cart.chr[base + addr]=val; } else { const base = (addr<0x1000? this.chrBank0: this.chrBank1)*0x1000; this.cart.chr[base + (addr&0x0FFF)]=val; } } }
   }
-  class Mapper2 extends Mapper{
-    constructor(c){ super(c); this.bank=0; }
-    prgRead(addr){ if(addr<0xC000){ const base=this.bank*0x4000; return this.cart.prg[base + (addr-0x8000)]; } return this.cart.prg[this.cart.prg.length-0x4000 + (addr-0xC000)]; }
-    prgWrite(addr,val){ this.bank = val & 0x0F; }
+  class Mapper2 extends Mapper {
+  constructor(c) {
+    super(c);
+    this.bank = 0;
   }
-  class Mapper3 extends Mapper{
-    constructor(c){ super(c); this.chrBank=0; }
-    prgRead(addr){ return this.cart.prg[addr-0x8000]; }
-    prgWrite(addr,val){ this.chrBank = val & 0x03; }
-    chrRead(addr){ const base=this.chrBank*0x2000; return this.cart.chr[base + addr]; }
+  
+  prgRead(addr) {
+    if (addr < 0xC000) {
+      const base = this.bank * 0x4000;
+      return this.cart.prg[base + (addr - 0x8000)];
+    }
+    // Fixed last 16KB bank at $C000-$FFFF
+    return this.cart.prg[this.cart.prg.length - 0x4000 + (addr - 0xC000)];
   }
+  
+  prgWrite(addr, val) {
+    // Bank select register - lower 4 bits select 16KB PRG bank
+    this.bank = val & 0x0F;
+  }
+  
+  chrRead(addr) {
+    // Mapper 2 uses CHR RAM, not ROM
+    return this.cart.chr[addr];
+  }
+  
+  chrWrite(addr, val) {
+    // CHR RAM is always writable on Mapper 2
+    this.cart.chr[addr] = val;
+  }
+}
+
+class Mapper3 extends Mapper {
+  constructor(c) {
+    super(c);
+    this.chrBank = 0;
+  }
+  
+  prgRead(addr) {
+    // PRG ROM is not banked - either 16KB or 32KB
+    // If 16KB, mirror it; if 32KB, use full range
+    const prgMask = (this.cart.prg.length > 0x4000) ? 0x7FFF : 0x3FFF;
+    return this.cart.prg[(addr - 0x8000) & prgMask];
+  }
+  
+  prgWrite(addr, val) {
+    // Bank select register - lower 2 bits select 8KB CHR bank
+    this.chrBank = val & 0x03;
+  }
+  
+  chrRead(addr) {
+    // Switchable 8KB CHR bank
+    const base = this.chrBank * 0x2000;
+    return this.cart.chr[base + addr];
+  }
+  
+  chrWrite(addr, val) {
+    // CHR ROM is typically read-only, but support CHR RAM if present
+    if (!this.cart.chrROM) {
+      const base = this.chrBank * 0x2000;
+      this.cart.chr[base + addr] = val;
+    }
+  }
+}
  class Mapper4 extends Mapper {
     constructor(cart) {
         super(cart); 
