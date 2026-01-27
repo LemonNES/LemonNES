@@ -405,99 +405,94 @@ class APU {
   createNoiseChannel() { return { enabled: false, lengthCounter: 0, lengthHalt: false, constantVolume: false, volume: 0, timer: 0, timerPeriod: 0, timerCycle: 0, mode: false, shiftRegister: 1, envelopeStart: false, envelopeCounter: 0, envelopeVolume: 0, envelopePeriod: 0, output: 0 }; }
   createDMCChannel() { return { enabled: false, irqEnabled: false, loop: false, timer: 0, timerPeriod: 0, timerCycle: 0, output: 0, sampleAddress: 0, sampleLength: 0, currentAddress: 0, bytesRemaining: 0, sampleBuffer: 0, sampleBufferEmpty: true, shiftRegister: 0, bitsRemaining: 0, silence: true }; }
 
-  step(cpuCycles) {
-    this.totalCycles += cpuCycles;
-    this.stepFrameSequencer(cpuCycles);
 
-    // Run the APU for every CPU cycle
+step(cpuCycles) {
+    // 1. Precise Cycle Tracking
     for (let i = 0; i < cpuCycles; i++) {
-      // 1. Step Timers
-      // Pulse/Noise/DMC run every 2nd CPU cycle (APU Clock)
-      if ((this.totalCycles + i) % 2 === 0) {
-        this.stepPulseTimer(this.pulse1);
-        this.stepPulseTimer(this.pulse2);
-        this.stepNoiseTimer(this.noise);
-        this.stepDMCTimer(this.dmc);
-      }
-      // Triangle runs every CPU cycle
-      this.stepTriangleTimer(this.triangle);
-      
-      // 2. Accumulate Output (Downsampling/Anti-Aliasing)
-      // Instead of taking one snapshot at the end, we sum EVERY cycle
-      this.sampleAccumulator += this.mixOutput();
-      this.sampleCount++;
-      
-      // 3. Output Sample if needed
-      this.cycleAccumulator += 1; // Reuse variable or use local counter
+        this.totalCycles++;
+        
+        // The Frame Sequencer clocks based on a specific cycle count
+        this.stepFrameSequencer(1); 
+
+        // Pulse and Noise clock on every second CPU cycle
+        if (this.totalCycles % 2 === 0) {
+            this.stepPulseTimer(this.pulse1);
+            this.stepPulseTimer(this.pulse2);
+            this.stepNoiseTimer(this.noise);
+            this.stepDMCTimer(this.dmc);
+        }
+        
+        // Triangle clocks on EVERY CPU cycle
+        this.stepTriangleTimer(this.triangle);
+
+        // Accumulate for anti-aliasing
+        this.sampleAccumulator += this.mixOutput();
+        this.sampleCount++;
     }
-    
-    // Check if we have gathered enough cycles to emit a sample
-    // Using a separate accumulator for sample timing prevents drift
-    this.cycleTimer = (this.cycleTimer || 0) + cpuCycles;
-    
+
+    // 2. Sample Generation tied to Audio Context Sample Rate
+    this.cycleTimer += cpuCycles;
     while (this.cycleTimer >= this.cyclesPerSample) {
-      this.cycleTimer -= this.cyclesPerSample;
-      
-      // AVERAGE the accumulated samples (Box Filter)
-      // This kills the high-pitch "screech" aliasing
-      let rawSample = this.sampleAccumulator / this.sampleCount;
-      if (this.sampleCount === 0) rawSample = 0; // Safety
-      
-      // Reset accumulators
-      this.sampleAccumulator = 0;
-      this.sampleCount = 0;
+        this.cycleTimer -= this.cyclesPerSample;
+        
+        let rawSample = this.sampleCount > 0 ? this.sampleAccumulator / this.sampleCount : 0;
+        this.sampleAccumulator = 0;
+        this.sampleCount = 0;
 
-      // Apply Filters
-      const filteredSample = this.applyFilters(rawSample);
-      
-      // Push to buffer (Limit size to prevent lag)
-      if(this.audioBuffer.length < this.bufferSize * 4) {
-        this.audioBuffer.push(filteredSample * (Settings.audio.enabled ? 1 : 0) * Settings.audio.volume);
-      }
+        const filtered = this.applyFilters(rawSample);
+        
+        if (this.audioBuffer.length < this.bufferSize * 2) {
+            this.audioBuffer.push(filtered);
+        }
     }
-  }
-  
-  applyFilters(sample) {
-    // 1. High-Pass (DC Blocker) - Removes the "buzz" and centering issues
-    // y[n] = x[n] - x[n-1] + 0.995 * y[n-1]
-    const hpOut = sample - this.filterLow + 0.995 * this.filterHigh;
-    this.filterLow = sample;
-    this.filterHigh = hpOut;
+}
 
-    // 2. Low-Pass (Simple RC Filter simulation) - Cuts harsh high frequencies
-    // Matches TV output characteristics (approx 14kHz cutoff)
-    // y[n] = y[n-1] + 0.8 * (x[n] - y[n-1]) 
-    // Higher factor (0.8) = Brighter, Lower (0.3) = Muffled
-    this.lpVal += (hpOut - this.lpVal) * 0.8;
+stepFrameSequencer(cycles) {
+    // Instead of a float (7457.5), the NES uses an exact cycle count for the 4-step sequence:
+    // Step 1: 7457
+    // Step 2: 14913
+    // Step 3: 22371
+    // Step 4: 29829 <--- IRQ happens here
     
-    return this.lpVal;
-  }
+    this.frameSequencerCycle += cycles;
 
-  // ... [stepFrameSequencer, stepPulseTimer, etc. remain exactly the same as previous, 
-  // ensure stepPulseTimer/etc use logic below] ...
-  
-  stepFrameSequencer(cpuCycles) {
-    this.frameSequencerCycle += cpuCycles;
-    const FRAME_COUNTER_PERIOD = 7457.5;
-    while (this.frameSequencerCycle >= FRAME_COUNTER_PERIOD) {
-      this.frameSequencerCycle -= FRAME_COUNTER_PERIOD;
-      if (this.frameMode === 0) {
-        switch (this.frameCounter) {
-          case 0: case 2: this.clockEnvelopes(); this.clockTriangleLinearCounter(); break;
-          case 1: this.clockEnvelopes(); this.clockTriangleLinearCounter(); this.clockLengthCounters(); this.clockSweeps(); break;
-          case 3: this.clockEnvelopes(); this.clockTriangleLinearCounter(); this.clockLengthCounters(); this.clockSweeps(); if (!this.irqInhibit) this.frameIRQ = true; break;
+    // Reset logic for 4-step mode (Mode 0)
+    if (this.frameMode === 0) {
+        if (this.frameSequencerCycle === 7457) {
+            this.clockEnvelopes();
+            this.clockTriangleLinearCounter();
+        } else if (this.frameSequencerCycle === 14913) {
+            this.clockEnvelopes();
+            this.clockTriangleLinearCounter();
+            this.clockLengthCounters();
+            this.clockSweeps();
+        } else if (this.frameSequencerCycle === 22371) {
+            this.clockEnvelopes();
+            this.clockTriangleLinearCounter();
+        } else if (this.frameSequencerCycle === 29828) {
+            if (!this.irqInhibit) this.frameIRQ = true;
+        } else if (this.frameSequencerCycle >= 29829) {
+            this.clockEnvelopes();
+            this.clockTriangleLinearCounter();
+            this.clockLengthCounters();
+            this.clockSweeps();
+            if (!this.irqInhibit) this.frameIRQ = true;
+            this.frameSequencerCycle = 0; // End of frame
         }
-        this.frameCounter = (this.frameCounter + 1) % 4;
-      } else {
-        switch (this.frameCounter) {
-          case 0: case 2: this.clockEnvelopes(); this.clockTriangleLinearCounter(); break;
-          case 1: case 3: this.clockEnvelopes(); this.clockTriangleLinearCounter(); this.clockLengthCounters(); this.clockSweeps(); break;
+    } else {
+        // 5-step mode (Mode 1) - cycles: 7457, 14913, 22371, 29829, 37281
+        if (this.frameSequencerCycle === 7457 || this.frameSequencerCycle === 22371) {
+            this.clockEnvelopes();
+            this.clockTriangleLinearCounter();
+        } else if (this.frameSequencerCycle === 14913 || this.frameSequencerCycle >= 37281) {
+            this.clockEnvelopes();
+            this.clockTriangleLinearCounter();
+            this.clockLengthCounters();
+            this.clockSweeps();
+            if (this.frameSequencerCycle >= 37281) this.frameSequencerCycle = 0;
         }
-        this.frameCounter = (this.frameCounter + 1) % 5;
-      }
     }
-  }
-
+}
   stepPulseTimer(pulse) {
     if (pulse.timerPeriod < 8) return; 
     pulse.timerCycle++;
