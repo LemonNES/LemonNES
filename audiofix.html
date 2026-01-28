@@ -265,7 +265,7 @@
   };
   // ===== APU Timing Constants =====
   const CPU_FREQ = 1789773;
-  // REMOVED FIXED SAMPLE RATE CONSTANTS
+  // REMOVED HARDCODED 44100Hz CONSTANTS HERE
   const NTSC_FPS = 60.0988;
   const CPU_CYCLES_PER_FRAME = Math.round(CPU_FREQ / NTSC_FPS);
   // ===== Utilities =====
@@ -336,9 +336,10 @@
       this.triangle = this.createTriangleChannel(); this.noise = this.createNoiseChannel(); this.dmc = this.createDMCChannel();
       this.totalCycles = 0; 
       
-      // Default fallback if audio init fails (44.1kHz standard)
+      // Default fallback if initAudio hasn't run yet (standard 44.1k fallback)
+      // This will be overwritten instantly by initAudio() with the REAL rate.
       this.cyclesPerSample = CPU_FREQ / 44100;
-      
+
       this.initAudio();
       this.lengthTable = [10,254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30];
       this.noiseTable = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
@@ -347,19 +348,19 @@
     initAudio() {
       try {
         const AudioCtor = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtor) return;
-        this.audioCtx = new AudioCtor(); // Allow browser to pick its native rate
+        if(!AudioCtor) return;
         
-        // CRITICAL FIX: Calculate cyclesPerSample based on the ACTUAL hardware sample rate (e.g. 48000Hz)
-        if (this.audioCtx.sampleRate) {
+        // CRITICAL FIX: Do NOT pass {sampleRate: 44100}. Let the browser pick the hardware native rate (e.g. 48000).
+        this.audioCtx = new AudioCtor(); 
+        
+        // CRITICAL FIX: Calculate cyclesPerSample based on the ACTUAL hardware sample rate.
+        if(this.audioCtx.sampleRate) {
            this.cyclesPerSample = CPU_FREQ / this.audioCtx.sampleRate;
         }
 
         this.scriptNode = this.audioCtx.createScriptProcessor(this.bufferSize, 0, 1);
         this.scriptNode.onaudioprocess = (e) => {
           const output = e.outputBuffer.getChannelData(0);
-          // Only shift what we have. If empty, write 0 (silence).
-          // Do NOT aggressively backfill audioBuffer with 0s; that causes latency drift.
           for (let i = 0; i < output.length; i++) { 
              output[i] = this.audioBuffer.shift() || 0; 
           }
@@ -379,7 +380,8 @@
         this.stepTriangleTimer(this.triangle); this.stepDMCTimer(this.dmc);
       }
       this.cpuCycleAccumulator += cpuCycles;
-      // Use dynamic cyclesPerSample
+      
+      // CRITICAL FIX: Use the dynamic cyclesPerSample instead of a constant
       while (this.cpuCycleAccumulator >= this.cyclesPerSample) {
         this.cpuCycleAccumulator -= this.cyclesPerSample;
         const sample = this.mixOutput();
